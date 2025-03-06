@@ -1,44 +1,50 @@
-import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 
-# Sample DataFrame
-data = {
-    'time': pd.date_range(start='10:00', periods=10, freq='T'),  # Generating time
-    'size': [100, 110, 120, 130, 140, 150, 160, 170, 180, 190],
-    'value1': [10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
-    'value2': [200, 180, 160, 140, 120, 100, 80, 60, 40, 20]
-}
-df = pd.DataFrame(data)
+# Convert Timestamp to datetime for proper plotting
+df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="%H:%M:%S")
 
-# Plot
-fig, ax1 = plt.subplots(figsize=(10, 5))
+# Convert Overall POV to numeric (removing percentage sign)
+df["Overall POV"] = df["Overall POV"].str.rstrip('%').astype(float)
 
-# First Y-axis (Primary)
-sns.lineplot(x=df['time'], y=df['size'], ax=ax1, color='b', label='Size')
-ax1.set_ylabel('Size', color='b')
-ax1.tick_params(axis='y', labelcolor='b')
+# Set up the figure and axes
+fig, ax1 = plt.subplots(figsize=(12, 6))
 
-# Second Y-axis
+# Line chart for Indicative Size
+ax1.plot(df["Timestamp"], df["Indicative Size"], marker='o', linestyle='-', label="Indicative Size", color='blue')
+ax1.set_ylabel("Indicative Size")
+ax1.set_xlabel("Timestamp")
+
+# Secondary Y-axis for stacked area chart
 ax2 = ax1.twinx()
-line1, = ax2.plot(df['time'], df['value1'], color='r', label='Value1')  # Save handle for legend
-ax2.set_ylabel('Value1', color='r')
-ax2.tick_params(axis='y', labelcolor='r')
+ax2.stackplot(
+    df["Timestamp"],
+    df["Must Complete (10%)"],
+    df["Scaling Algo Child Order Size"],
+    df["Opportunistic Qty"].fillna(0),
+    labels=["Must Complete", "Scaling Algo Child Order", "Opportunistic Qty"],
+    alpha=0.5
+)
+ax2.set_ylabel("Order Quantities")
 
-# Third Y-axis
+# Third Y-axis for Overall POV
 ax3 = ax1.twinx()
-ax3.spines['right'].set_position(('outward', 60))  # Offset third axis
-line2, = ax3.plot(df['time'], df['value2'], color='g', label='Value2')  # Save handle for legend
-ax3.set_ylabel('Value2', color='g')
-ax3.tick_params(axis='y', labelcolor='g')
+ax3.spines["right"].set_position(("outward", 60))
+ax3.plot(df["Timestamp"], df["Overall POV"], marker='s', linestyle='--', label="Overall POV", color='black')
+ax3.set_ylabel("Overall POV (%)")
 
-# Combining Legends
-lines = [line1, line2]
-labels = [line.get_label() for line in lines]
-ax2.legend(lines, labels, loc='upper left', bbox_to_anchor=(1.1, 1))
+# Legends
+ax1.legend(loc="upper left")
+ax2.legend(loc="upper right")
 
-# Formatting
-ax1.set_xlabel('Time')
-ax1.set_xticklabels(df['time'].dt.strftime('%H:%M'), rotation=45)
-fig.tight_layout()
+# Another line chart for indicative and opportunistic prices
+fig, ax4 = plt.subplots(figsize=(12, 4))
+ax4.plot(df["Timestamp"], df["Indicative Price"], marker='o', linestyle='-', label="Indicative Price", color='green')
+ax4.plot(df["Timestamp"], df["Opportunistic Price"], marker='s', linestyle='--', label="Opportunistic Price", color='red')
+ax4.set_xlabel("Timestamp")
+ax4.set_ylabel("Price")
+ax4.legend()
+plt.xticks(rotation=45)
+
+# Display the plots
 plt.show()
