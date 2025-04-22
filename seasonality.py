@@ -3,54 +3,58 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 
-# Step 1: Create 3 years of synthetic monthly data
-months = np.tile(np.arange(1, 13), 3)  # Repeat 1–12 for 3 years
+# Step 1: Create 3 years of synthetic volume data
+months = np.tile(np.arange(1, 13), 3)
 years = np.repeat([2022, 2023, 2024], 12)
 time_index = np.arange(len(months))
 
-# Create seasonal sales with some randomness
-base_sales = np.array([50, 60, 80, 120, 150, 200, 220, 210, 160, 100, 70, 55])
-sales = np.tile(base_sales, 3) + np.random.normal(0, 10, size=36)  # add noise
+# Create base volume levels with expected seasonal dips
+base_volumes = np.array([100, 105, 110, 115, 110, 90, 85, 90, 110, 115, 110, 95])
+# Note: dips in June–Aug and Dec
 
-df = pd.DataFrame({'Year': years, 'Month': months, 'Sales': sales, 'Time': time_index})
+# Add a slight upward trend and noise
+volumes = np.tile(base_volumes, 3) + time_index * 0.5 + np.random.normal(0, 3, size=36)
 
-# Step 2: Add cyclical features for seasonality
+df = pd.DataFrame({'Year': years, 'Month': months, 'Volume': volumes, 'Time': time_index})
+
+# Step 2: Feature engineering (seasonal + time trend)
 df['sin_month'] = np.sin(2 * np.pi * df['Month'] / 12)
 df['cos_month'] = np.cos(2 * np.pi * df['Month'] / 12)
 
-# Step 3: Train Linear Regression
+# Step 3: Train linear regression model
 X = df[['sin_month', 'cos_month', 'Time']]
-y = df['Sales']
+y = df['Volume']
+
 model = LinearRegression()
 model.fit(X, y)
 
-# Step 4: Predict next 12 months (2025)
+# Step 4: Predict future (12 months ahead = 2025)
 future_months = np.arange(1, 13)
-future_year = np.repeat(2025, 12)
+future_years = np.repeat(2025, 12)
 future_time_index = np.arange(len(df), len(df) + 12)
 
 future_df = pd.DataFrame({
-    'Year': future_year,
+    'Year': future_years,
     'Month': future_months,
     'Time': future_time_index
 })
 future_df['sin_month'] = np.sin(2 * np.pi * future_df['Month'] / 12)
 future_df['cos_month'] = np.cos(2 * np.pi * future_df['Month'] / 12)
 
-future_df['Predicted_Sales'] = model.predict(future_df[['sin_month', 'cos_month', 'Time']])
+future_df['Predicted_Volume'] = model.predict(future_df[['sin_month', 'cos_month', 'Time']])
 
-# Combine for plotting
-df['Predicted_Sales'] = model.predict(X)
+# Combine actual and future for plotting
+df['Predicted_Volume'] = model.predict(X)
 combined_df = pd.concat([df, future_df], ignore_index=True)
 
-# Step 5: Plot actual + predicted
+# Step 5: Plot actual vs predicted volumes
 plt.figure(figsize=(12, 6))
-plt.plot(combined_df.index, combined_df['Sales'], marker='o', label='Actual Sales')
-plt.plot(combined_df.index, combined_df['Predicted_Sales'], linestyle='--', marker='x', label='Predicted Sales')
+plt.plot(combined_df.index, combined_df['Volume'], marker='o', label='Actual Volume')
+plt.plot(combined_df.index, combined_df['Predicted_Volume'], linestyle='--', marker='x', label='Predicted Volume')
 plt.axvline(x=35.5, color='grey', linestyle=':', label='Forecast Starts (2025)')
-plt.title('Ice Cream Sales: Actual (3 years) + Forecast (1 year)')
+plt.title('Monthly Average Equity Market Volume (with Seasonality)')
 plt.xlabel('Month Index')
-plt.ylabel('Sales (£)')
+plt.ylabel('Avg Volume (Millions)')
 plt.legend()
 plt.grid(True)
 plt.show()
