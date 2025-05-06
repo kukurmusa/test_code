@@ -91,3 +91,15 @@ barraPortfolioRisk:{[weights; X; F; specVar; notional]
         ! (var95; var99; var95bps; var99bps)
     )
 };
+
+
+
+/ Example data
+weights: 0.3 0.3 0.2 0.2;
+X: (1.2 0.3 0.1; 1.1 0.2 0.2; 0.8 -0.1 0.5; 0.9 0.0 0.7);
+F: (0.05 0.01 0.00; 0.01 0.03 0.01; 0.00 0.01 0.04);
+specVar: 0.02 0.015 0.025 0.03;
+notional: 10000000;
+
+/ Run the function
+barraPortfolioRisk[weights; X; F; specVar; notional]
