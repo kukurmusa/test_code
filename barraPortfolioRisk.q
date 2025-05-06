@@ -3,7 +3,7 @@
 / barraPortfolioRisk.q
 / Computes Barra-style portfolio risk, breakdowns, and VaR
 /--------------------------------------------------------------
-
+diag:{(count x)#'0N}; diag[x] +\: x
 barraPortfolioRisk:{[weights; X; F; specVar; notional]
 
     / Convert to matrices
