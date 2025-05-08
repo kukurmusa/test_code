@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VueJS Category Buttons</title>
+  <!-- Import Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Import VueJS -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body>
+  <div id="app" class="container mx-auto p-4">
+    <!-- Search Bar -->
+    <div class="mb-4">
+      <input 
+        v-model="searchQuery" 
+        type="text" 
+        placeholder="Search..." 
+        class="w-full p-2 border border-gray-300 rounded-md shadow-sm"
+      />
+    </div>
+    <!-- Country Sections -->
+    <div v-for="(group, country) in groupedButtons" :key="country" class="mb-8">
+      <h2 class="text-2xl font-bold mb-4">{{ country }}</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div 
+          v-for="button in group" 
+          :key="button.text" 
+          class="p-4 rounded-md shadow-md" 
+          :class="button.color"
+        >
+          <a :href="button.link" class="text-white font-bold text-lg">{{ button.text }}</a>
+          <p class="text-white text-sm">{{ button.description }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, computed } = Vue;
+    createApp({
+      setup() {
+        const searchQuery = ref('')
+        const buttons = ref([
+          { text: 'London', description: 'Capital of UK', link: 'london.html', color: 'bg-blue-500', category: 'United Kingdom' },
+          { text: 'Edinburgh', description: 'Capital of Scotland', link: 'edinburgh.html', color: 'bg-blue-500', category: 'United Kingdom' },
+          { text: 'Manchester', description: 'Famous for football', link: 'manchester.html', color: 'bg-blue-500', category: 'United Kingdom' },
+          { text: 'Glasgow', description: 'Largest city in Scotland', link: 'glasgow.html', color: 'bg-blue-500', category: 'United Kingdom' },
+          { text: 'Birmingham', description: 'Second largest city', link: 'birmingham.html', color: 'bg-blue-500', category: 'United Kingdom' },
+          { text: 'New York', description: 'City that never sleeps', link: 'newyork.html', color: 'bg-red-500', category: 'United States' },
+          { text: 'Los Angeles', description: 'Hollywood city', link: 'losangeles.html', color: 'bg-red-500', category: 'United States' },
+          { text: 'Chicago', description: 'Windy city', link: 'chicago.html', color: 'bg-red-500', category: 'United States' },
+          { text: 'Houston', description: 'Space city', link: 'houston.html', color: 'bg-red-500', category: 'United States' },
+          { text: 'Miami', description: 'Beach city', link: 'miami.html', color: 'bg-red-500', category: 'United States' }
+        ])
+
+        const filteredButtons = computed(() => {
+          if (!searchQuery.value) return buttons.value
+          return buttons.value.filter(button =>
+            button.text.toLowerCase().includes(searchQuery.value.toLowerCase()) ||
+            button.description.toLowerCase().includes(searchQuery.value.toLowerCase())
+          )
+        })
+
+        const groupedButtons = computed(() => {
+          const groups = {}
+          filteredButtons.value.forEach(button => {
+            if (!groups[button.category]) groups[button.category] = []
+            groups[button.category].push(button)
+          })
+          return groups
+        })
+
+        return { searchQuery, groupedButtons }
+      }
+    }).mount('#app')
+  </script>
+</body>
+</html>
