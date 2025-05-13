@@ -57,3 +57,48 @@ final_model = lgb.train(
 
 # Final predictions
 y_pred = final_model.predict(X_test)
+
+
+###-------------------------------pip install optuna[visualization]------------------
+import optuna.visualization as vis
+
+# Plot optimization history (RMSE over trials)
+vis.plot_optimization_history(study).show()
+
+# Plot importance of hyperparameters
+vis.plot_param_importances(study).show()
+
+# Optional: parallel coordinate or slice plot
+vis.plot_parallel_coordinate(study).show()
+
+
+import joblib
+
+# Save to file
+joblib.dump(final_model, "best_lgbm_model.pkl")
+final_model.save_model("best_lgbm_model.txt")
+
+
+
+# Load from joblib
+model = joblib.load("best_lgbm_model.pkl")
+
+# OR load from LightGBM native file
+model = lgb.Booster(model_file="best_lgbm_model.txt")
+
+
+y_pred = model.predict(X_test)
+
+
+import json
+
+# Save best params to JSON
+with open("best_params.json", "w") as f:
+    json.dump(study.best_params, f)
+
+# Load params
+with open("best_params.json") as f:
+    best_params = json.load(f)
+
+
+
