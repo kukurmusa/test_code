@@ -86,3 +86,20 @@ for name, weight in zip(hedge_names, hedge_weights):
     print(f"Hedge Notional for {name}: {weight:.2f} EUR")
 
 print("\nResidual exposures:", residuals)
+
+
+
+########################################################################################################################################################################
+
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Suppose you have: target_exposure (1x3), all_stock_exposures (Nx3)
+target_exposure = np.array([0.8, 0.2, -0.1]).reshape(1, -1)
+all_stock_exposures = np.random.randn(500, 3)  # example of 500 stocks
+
+# Compute similarity
+similarities = cosine_similarity(all_stock_exposures, target_exposure)
+
+# Sort to find stocks with most negative similarity (best hedge)
+top_indices = similarities.flatten().argsort()[:8]
+hedge_basket = all_stock_exposures[top_indices]
