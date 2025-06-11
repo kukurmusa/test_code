@@ -104,19 +104,25 @@ if data_source == "Upload CSV File":
     uploaded_file = st.file_uploader("Upload your basket CSV file:", type=["csv"])
     if uploaded_file is not None:
         basket_df = pd.read_csv(uploaded_file)
+        st.session_state["basket_df"] = basket_df
         # st.dataframe(basket_df)
 elif data_source == "Query from KDB":
     query_string = st.text_area("Enter your KDB query:", "select from basket where ...")  # Let user input query
     if st.button("Run KDB Query"):
         basket_df = query_kdb_for_basket(query_string)
         st.success("✅ Basket data loaded from KDB!")
+        st.session_state["basket_df"] = basket_df
         # st.dataframe(basket_df)
     # st.dataframe(basket_df)
 
+if "basket_df" in st.session_state:
+    basket_df = st.session_state["basket_df"]
+else:
+    basket_df = None
 
 if basket_df is not None:
-    with st.spinner("Processing uploaded file..."):
-        time.sleep(2)
+    # with st.spinner("Processing uploaded file..."):
+    #     time.sleep(2)
 
     required_columns = {"Ticker", "Position ($)", "Direction"}
     if not required_columns.issubset(basket_df.columns):
