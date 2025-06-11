@@ -1,4 +1,6 @@
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -131,7 +133,31 @@ if basket_df is not None:
         st.success("✅ Basket file loaded and validated!")
 
         with st.expander("📂 Basket Positions", expanded=True):
-            st.dataframe(basket_df)
+            gb = GridOptionsBuilder.from_dataframe(basket_df)
+            paginationSize = min(len(basket_df),10)
+            gb.configure_pagination(enabled=True, paginationAutoPageSize=False, paginationPageSize=paginationSize)
+            gb.configure_default_column(editable=False, groupable=True)
+
+            gb.configure_column(
+                "Position ($)",
+                type=["numericColumn"],
+                valueFormatter="x.toLocaleString('en-US')"
+            )
+
+            grid_options = gb.build()
+
+            # Calculate dynamic height for 10 rows per page
+            row_height = 35  # Adjust based on font/row spacing
+            calculated_height = row_height * (paginationSize + 1)  # 10 rows + header
+
+            AgGrid(
+                basket_df,
+                gridOptions=grid_options,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                height=calculated_height,  # Dynamically calculated
+                width='100%',
+                fit_columns_on_grid_load=True
+            )
 
         with st.expander("📊 Pre-Trade Summary", expanded=True):
             long_positions = basket_df[basket_df["Direction"].str.lower() == "long"]["Position ($)"].sum()
@@ -156,73 +182,102 @@ if basket_df is not None:
         with st.expander("🗂️ Hedge Recommendations Grid", expanded=True):
             hedge_df = get_detailed_hedge_recommendations(basket_df["Ticker"].tolist(), gross_notional)
 
-            format_dict = {"Price": "{:,.2f}", "Contract Size": "{:,.0f}", "Beta": "{:,.2f}", "Correlation": "{:,.2f}",
-                           "Num Contracts/Shares": "{:,.2f}", "Hedge $ Value": "${:,.2f}", "ADV%": "{:,.2f}%", "Expected POV%": "{:,.2f}%"}
+            hedge_types = hedge_df["Type"].unique()
+            hedge_tabs = st.tabs(list(hedge_types))
 
-            styled_df = hedge_df.style.format(format_dict).background_gradient(subset=["Beta"], cmap="RdBu")\
-                .background_gradient(subset=["Correlation"], cmap="RdBu")
+            for i, hedge_type in enumerate(hedge_types):
+                with hedge_tabs[i]:
+                    st.markdown(f"### Hedge Type: {hedge_type}")
+                    filtered_hedge_df = hedge_df[hedge_df["Type"] == hedge_type]
 
-            st.dataframe(styled_df, use_container_width=True)
+                    # Format & style
+                    format_dict = {"Price": "{:,.2f}", "Contract Size": "{:,.0f}", "Beta": "{:,.2f}",
+                                   "Correlation": "{:,.2f}",
+                                   "Num Contracts/Shares": "{:,.2f}", "Hedge $ Value": "${:,.2f}",
+                                   "ADV%": "{:,.2f}%", "Expected POV%": "{:,.2f}%"}
+                    styled_df = filtered_hedge_df.style.format(format_dict)
+                    st.dataframe(styled_df, use_container_width=True)
 
-        with st.expander("🔍 Hedge Details and Chart", expanded=True):
-            hedge_instruments = hedge_df["Hedge Instrument"].tolist()
-            st.markdown("**Select a Hedge Instrument to view details and charts:**")
-            selected_hedge_instrument = st.selectbox("", hedge_instruments)
-
-            if selected_hedge_instrument:
-                selected_hedge = hedge_df[hedge_df["Hedge Instrument"] == selected_hedge_instrument].iloc[0]
-                tab1, tab2 = st.tabs(["Text Details", "Charts"])
-
-                with tab1:
-                    if "Single-Stock Hedge Basket" in selected_hedge_instrument:
-                        hedge_basket_df = pd.DataFrame({
-                            "Ticker": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
-                            "Position ($)": [100_000, 80_000, 90_000, 70_000, 60_000],
-                            "Direction": ["Long"] * 5
-                        })
-                        hedge_summary = pd.DataFrame({"Metric": ["Total Hedge Notional ($)", "Number of Positions"],
-                                                      "Value": [f"${hedge_basket_df['Position ($)'].sum():,.2f}", "5"]})
-                        st.write("### 📦 Hedge Basket Constituents")
-                        st.dataframe(hedge_basket_df, use_container_width=True)
-                        st.write("### 🧮 Hedge Basket Pre-Trade Summary")
-                        st.dataframe(hedge_summary, use_container_width=True)
-
-                    st.write(f"**Beta:** {selected_hedge['Beta']:,.2f}")
-                    st.write(f"**Correlation:** {selected_hedge['Correlation']:,.2f}")
-                    st.write(f"**ADV%:** {selected_hedge['ADV%']:,.2f}%")
-                    st.write(f"**Expected POV%:** {selected_hedge['Expected POV%']:,.2f}%")
-                    st.write(f"**Total Hedge $ Value:** ${selected_hedge['Hedge $ Value']:,.2f} (for 100% basket hedge)")
-                with tab2:
-                    basket_returns = generate_dummy_returns(seed=42)
-                    hedge_returns = generate_dummy_returns(seed=999 if "Single-Stock Hedge Basket" in selected_hedge_instrument else hedge_instruments.index(selected_hedge_instrument))
-                    fig_returns = go.Figure()
-                    fig_returns.add_trace(go.Scatter(x=basket_returns.index, y=basket_returns.values, mode='lines', name='Basket Returns', line=dict(width=2)))
-                    fig_returns.add_trace(go.Scatter(x=hedge_returns.index, y=hedge_returns.values, mode='lines', name=f'{selected_hedge_instrument} Returns', line=dict(width=2, dash='dash')))
-                    fig_returns.update_layout(title="Cumulative Dummy Returns", xaxis_title="Date", yaxis_title="Cumulative Returns")
-                    st.plotly_chart(fig_returns, use_container_width=True)
-
-                    # Simulate hedged basket performance
-                    hedged_returns, tracking_error, basket_cum, hedge_cum, hedged_cum = simulate_hedge_performance(
-                        basket_returns,
-                        hedge_returns,
-                        basket_beta=1.0,  # or real basket beta
-                        hedge_beta=selected_hedge['Beta']
+                    # Dropdown for selected hedge
+                    hedge_instruments = filtered_hedge_df["Hedge Instrument"].tolist()
+                    selected_hedge_instrument = st.selectbox(
+                        f"**Select a {hedge_type} Hedge Instrument:**",
+                        hedge_instruments,
+                        key=f"hedge_select_{hedge_type}"
                     )
 
-                    # Plot cumulative returns
-                    fig_cum = go.Figure()
-                    fig_cum.add_trace(
-                        go.Scatter(x=basket_returns.index, y=basket_cum, name="Basket", line=dict(width=2)))
-                    fig_cum.add_trace(go.Scatter(x=hedge_returns.index, y=hedge_cum, name="Hedge Instrument",
-                                                 line=dict(width=2, dash='dash')))
-                    fig_cum.add_trace(go.Scatter(x=hedge_returns.index, y=hedged_cum, name="Hedged Basket",
-                                                 line=dict(width=2, dash='dot')))
-                    fig_cum.update_layout(title="Cumulative Returns (Simulated Hedge Impact)", xaxis_title="Date",
-                                          yaxis_title="Cumulative Returns")
-                    st.plotly_chart(fig_cum, use_container_width=True)
+                    if selected_hedge_instrument:
+                        selected_hedge = hedge_df[hedge_df["Hedge Instrument"] == selected_hedge_instrument].iloc[0]
+                        tab1, tab2 = st.tabs(["Text Details", "Charts"])
 
-                    # Display tracking error
-                    st.write(f"**Simulated Tracking Error:** {tracking_error:.4f}")
+                        with tab1:
+                            if "Single-Stock Hedge Basket" in selected_hedge_instrument:
+                                hedge_basket_df = pd.DataFrame({
+                                    "Ticker": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+                                    "Position ($)": [100_000, 80_000, 90_000, 70_000, 60_000],
+                                    "Direction": ["Long"] * 5
+                                })
+                                hedge_summary = pd.DataFrame(
+                                    {"Metric": ["Total Hedge Notional ($)", "Number of Positions"],
+                                     "Value": [f"${hedge_basket_df['Position ($)'].sum():,.2f}", "5"]})
+                                st.write("### 📦 Hedge Basket Constituents")
+                                st.dataframe(hedge_basket_df, use_container_width=True)
+                                st.write("### 🧮 Hedge Basket Pre-Trade Summary")
+                                st.dataframe(hedge_summary, use_container_width=True)
+
+                            st.write(f"**Beta:** {selected_hedge['Beta']:,.2f}")
+                            st.write(f"**Correlation:** {selected_hedge['Correlation']:,.2f}")
+                            st.write(f"**ADV%:** {selected_hedge['ADV%']:,.2f}%")
+                            st.write(f"**Expected POV%:** {selected_hedge['Expected POV%']:,.2f}%")
+                            st.write(
+                                f"**Total Hedge $ Value:** ${selected_hedge['Hedge $ Value']:,.2f} (for 100% basket hedge)")
+                        with tab2:
+                            basket_returns = generate_dummy_returns(seed=42)
+                            hedge_returns = generate_dummy_returns(
+                                seed=999 if "Single-Stock Hedge Basket" in selected_hedge_instrument else hedge_instruments.index(
+                                    selected_hedge_instrument))
+                            fig_returns = go.Figure()
+                            fig_returns.add_trace(
+                                go.Scatter(x=basket_returns.index, y=basket_returns.values, mode='lines',
+                                           name='Basket Returns', line=dict(width=2)))
+                            fig_returns.add_trace(
+                                go.Scatter(x=hedge_returns.index, y=hedge_returns.values, mode='lines',
+                                           name=f'{selected_hedge_instrument} Returns',
+                                           line=dict(width=2, dash='dash')))
+                            fig_returns.update_layout(title="Cumulative Dummy Returns", xaxis_title="Date",
+                                                      yaxis_title="Cumulative Returns")
+                            st.plotly_chart(fig_returns, use_container_width=True)
+
+                            # Simulate hedged basket performance
+                            hedged_returns, tracking_error, basket_cum, hedge_cum, hedged_cum = simulate_hedge_performance(
+                                basket_returns,
+                                hedge_returns,
+                                basket_beta=1.0,  # or real basket beta
+                                hedge_beta=selected_hedge['Beta']
+                            )
+
+                            # Plot cumulative returns
+                            fig_cum = go.Figure()
+                            fig_cum.add_trace(
+                                go.Scatter(x=basket_returns.index, y=basket_cum, name="Basket", line=dict(width=2)))
+                            fig_cum.add_trace(go.Scatter(x=hedge_returns.index, y=hedge_cum, name="Hedge Instrument",
+                                                         line=dict(width=2, dash='dash')))
+                            fig_cum.add_trace(go.Scatter(x=hedge_returns.index, y=hedged_cum, name="Hedged Basket",
+                                                         line=dict(width=2, dash='dot')))
+                            fig_cum.update_layout(title="Cumulative Returns (Simulated Hedge Impact)",
+                                                  xaxis_title="Date",
+                                                  yaxis_title="Cumulative Returns")
+                            st.plotly_chart(fig_cum, use_container_width=True)
+
+                            # Display tracking error
+                            st.write(f"**Simulated Tracking Error:** {tracking_error:.4f}")
+
+        # with st.expander("🔍 Hedge Details and Chart", expanded=True):
+        #     hedge_instruments = hedge_df["Hedge Instrument"].tolist()
+        #     st.markdown("**Select a Hedge Instrument to view details and charts:**")
+        #     selected_hedge_instrument = st.selectbox("", hedge_instruments)
+
+
 
 else:
     st.warning("Please upload your basket CSV file or run KDB query to get started.")
