@@ -13,6 +13,15 @@ def generate_dummy_returns(seed=0):
     returns = np.random.normal(loc=0, scale=0.01, size=len(dates)).cumsum()
     return pd.Series(returns, index=dates)
 
+def query_kdb_for_basket(query_kdb_for_basket):
+    # Dummy KDB data for demonstration
+    data = {
+        "Ticker": ["AAPL", "MSFT", "GOOGL", "AMZN", "META"],
+        "Position ($)": [150_000, -80_000, 120_000, -100_000, 50_000],
+        "Direction": ["Long", "Short", "Long", "Short", "Long"]
+    }
+    return pd.DataFrame(data)
+
 def simulate_hedge_performance(basket_returns, hedge_returns, basket_beta, hedge_beta):
     # Basic hedge ratio
     hedge_ratio = basket_beta / hedge_beta if hedge_beta != 0 else 0
@@ -82,18 +91,38 @@ st.set_page_config(page_title="Hedge Recommendations", layout="wide")
 st.title("🛡️ Interactive Hedge Recommendations")
 
 # File upload and validation
-uploaded_file = st.file_uploader("Upload your basket CSV file here (Ticker, Position ($), Direction):", type=["csv"])
+# uploaded_file = st.file_uploader("Upload your basket CSV file here (Ticker, Position ($), Direction):", type=["csv"])
 
-if uploaded_file is not None:
+data_source = st.radio(
+    "Select data source for basket positions:",
+    ("Upload CSV File", "Query from KDB"),
+    index=0
+)
+basket_df = None
+
+if data_source == "Upload CSV File":
+    uploaded_file = st.file_uploader("Upload your basket CSV file:", type=["csv"])
+    if uploaded_file is not None:
+        basket_df = pd.read_csv(uploaded_file)
+        # st.dataframe(basket_df)
+elif data_source == "Query from KDB":
+    query_string = st.text_area("Enter your KDB query:", "select from basket where ...")  # Let user input query
+    if st.button("Run KDB Query"):
+        basket_df = query_kdb_for_basket(query_string)
+        st.success("✅ Basket data loaded from KDB!")
+        # st.dataframe(basket_df)
+    # st.dataframe(basket_df)
+
+
+if basket_df is not None:
     with st.spinner("Processing uploaded file..."):
         time.sleep(2)
-        basket_df = pd.read_csv(uploaded_file)
 
     required_columns = {"Ticker", "Position ($)", "Direction"}
     if not required_columns.issubset(basket_df.columns):
-        st.error("Uploaded CSV file is missing required columns: Ticker, Position ($), Direction.")
+        st.error("Loaded basket is missing required columns: Ticker, Position ($), Direction.")
     else:
-        st.success("✅ Basket file uploaded and validated!")
+        st.success("✅ Basket file loaded and validated!")
 
         with st.expander("📂 Basket Positions", expanded=True):
             st.dataframe(basket_df)
@@ -190,7 +219,7 @@ if uploaded_file is not None:
                     st.write(f"**Simulated Tracking Error:** {tracking_error:.4f}")
 
 else:
-    st.warning("Please upload your basket CSV file to get started.")
+    st.warning("Please upload your basket CSV file or run KDB query to get started.")
 
 st.markdown("---")
-st.caption("⚡ Powered by Streamlit & Plotly | Data is illustrative only.")
+st.caption("⚡ MAAS Execution Analytics")
