@@ -1,100 +1,92 @@
 import streamlit as st
-import asyncio
-import websockets
-import json
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-from threading import Thread
+from streamlit_autorefresh import st_autorefresh
 
-# Global order book cache
-order_book_data = {"bids": pd.DataFrame(), "asks": pd.DataFrame()}
-available_symbols = ["btcusdt", "ethusdt", "bnbusdt", "solusdt"]  # You can add more here
+# Must come before any other Streamlit calls
+st.set_page_config(layout="wide", page_title="Mock Order Book", page_icon="📊")
 
-# Binance WebSocket async function
-async def binance_depth_ws(symbol):
-    url = f"wss://stream.binance.com:9443/ws/{symbol}@depth5@100ms"
-    async with websockets.connect(url) as websocket:
-        while True:
-            data = await websocket.recv()
-            parsed = json.loads(data)
+# Refresh every second (1000 ms)
+st_autorefresh(interval=1000, key="orderbook_refresh")
 
-            bids = pd.DataFrame(parsed["bids"], columns=["Price", "Qty"]).astype(float)
-            asks = pd.DataFrame(parsed["asks"], columns=["Price", "Qty"]).astype(float)
+# ----------------------------
+# Mock Order Book Generator
+# ----------------------------
+def generate_mock_order_book(mid_price: float, spread: float = 0.5, depth: int = 5):
+    np.random.seed()  # prevent same randoms on rerun
+    bids = []
+    asks = []
 
-            # Sort and keep top 5 levels
-            order_book_data["bids"] = bids.sort_values("Price", ascending=False).head(5)
-            order_book_data["asks"] = asks.sort_values("Price", ascending=True).head(5)
+    for i in range(depth):
+        price_bid = round(mid_price - i * spread, 2)
+        qty_bid = round(np.random.uniform(1, 10), 2)
+        bids.append([price_bid, qty_bid])
 
-# Wrapper for asyncio thread
-def start_ws(symbol):
-    asyncio.run(binance_depth_ws(symbol))
+        price_ask = round(mid_price + i * spread, 2)
+        qty_ask = round(np.random.uniform(1, 10), 2)
+        asks.append([price_ask, qty_ask])
 
-# Launch WebSocket in background thread
-def launch_ws_thread(symbol):
-    thread = Thread(target=start_ws, args=(symbol,), daemon=True)
-    thread.start()
+    bid_df = pd.DataFrame(bids, columns=["Price", "Qty"])
+    ask_df = pd.DataFrame(asks, columns=["Price", "Qty"])
+    return bid_df, ask_df
 
-# Streamlit page config
-st.set_page_config(layout="wide")
-st.title("📡 Real-Time Order Book Viewer")
+# ----------------------------
+# UI + Chart
+# ----------------------------
 
-# Symbol selection
-symbol = st.selectbox("Choose trading pair", available_symbols)
+st.title("📡 Mock Real-Time Order Book")
 
-# Restart WebSocket if symbol changes
-if "current_symbol" not in st.session_state or st.session_state.current_symbol != symbol:
-    st.session_state.current_symbol = symbol
-    order_book_data["bids"], order_book_data["asks"] = pd.DataFrame(), pd.DataFrame()
-    launch_ws_thread(symbol)
+# Symbol dropdown
+symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "AAPL/USD"]
+selected_symbol = st.selectbox("Select Symbol", symbols)
 
-# Live update display
-placeholder = st.empty()
+# Generate random mid price for selected symbol
+base_prices = {"BTC/USDT": 30000, "ETH/USDT": 2000, "SOL/USDT": 100, "AAPL/USD": 180}
+mid_price = base_prices[selected_symbol] + np.random.uniform(-5, 5)
 
-while True:
-    with placeholder.container():
-        col1, col2 = st.columns(2)
+# Generate mock order book
+bids_df, asks_df = generate_mock_order_book(mid_price)
 
-        # Order Book Tables
-        col1.subheader("💰 Bids")
-        col1.table(order_book_data["bids"])
+# Layout: Tables
+col1, col2 = st.columns(2)
 
-        col2.subheader("🧾 Asks")
-        col2.table(order_book_data["asks"])
+col1.subheader("💰 Top Bids")
+col1.table(bids_df)
 
-        # Depth Chart
-        st.subheader("📊 Depth Chart (Price vs Qty)")
+col2.subheader("🧾 Top Asks")
+col2.table(asks_df)
 
-        if not order_book_data["bids"].empty and not order_book_data["asks"].empty:
-            bid_prices = order_book_data["bids"]["Price"]
-            bid_qtys = order_book_data["bids"]["Qty"].cumsum()  # Cumulative size
+# Layout: Depth Chart
+st.subheader("📊 Depth Chart (Price vs Cumulative Qty)")
 
-            ask_prices = order_book_data["asks"]["Price"]
-            ask_qtys = order_book_data["asks"]["Qty"].cumsum()
+bids_df_sorted = bids_df.sort_values(by="Price", ascending=True)
+asks_df_sorted = asks_df.sort_values(by="Price", ascending=True)
 
-            fig = go.Figure()
+fig = go.Figure()
 
-            fig.add_trace(go.Scatter(
-                x=bid_prices, y=bid_qtys,
-                mode='lines+markers',
-                name='Bids',
-                fill='tozeroy'
-            ))
+fig.add_trace(go.Scatter(
+    x=bids_df_sorted["Price"],
+    y=bids_df_sorted["Qty"].cumsum(),
+    mode="lines+markers",
+    name="Bids",
+    fill="tozeroy"
+))
 
-            fig.add_trace(go.Scatter(
-                x=ask_prices, y=ask_qtys,
-                mode='lines+markers',
-                name='Asks',
-                fill='tozeroy'
-            ))
+fig.add_trace(go.Scatter(
+    x=asks_df_sorted["Price"],
+    y=asks_df_sorted["Qty"].cumsum(),
+    mode="lines+markers",
+    name="Asks",
+    fill="tozeroy"
+))
 
-            fig.update_layout(
-                xaxis_title='Price',
-                yaxis_title='Cumulative Quantity',
-                template='plotly_white',
-                height=400,
-                margin=dict(l=20, r=20, t=20, b=20)
-            )
+fig.update_layout(
+    xaxis_title="Price",
+    yaxis_title="Cumulative Quantity",
+    template="plotly_white",
+    height=400,
+    margin=dict(l=20, r=20, t=20, b=20)
+)
 
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.sleep(1)
+st.plotly_chart(fig, use_container_width=True)
