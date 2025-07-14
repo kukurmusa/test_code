@@ -82,3 +82,13 @@ barraRiskBreakdownDollar:{
     )
   )
 }
+
+
+
+weights: 0.2 0.3 0.5
+X:(1 0.5 0 0 0; 0.4 1 0.6 0 0; 0.6 0.3 0 1 0.2)
+F:5#0.0; F[0 0]:0.04; F[1 1]:0.05; F[2 2]:0.03; F[3 3]:0.02; F[4 4]:0.015
+specVar:1.5 2.0 1.0  / Annualised variances (bps^2)
+notional:100000000f
+
+factorMeta:([] factor:`Value`Momentum`Tech`UK`France; category:`Style`Style`Industry`Country`Country)
