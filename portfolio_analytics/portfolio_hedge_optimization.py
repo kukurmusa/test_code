@@ -87,3 +87,42 @@ def run_server():
 
 if __name__ == '__main__':
     run_server()
+
+
+
+
+
+import numpy as np
+import cvxpy as cp
+
+# Dummy data (M futures, K factors)
+X_f = np.array([
+    [1.0, 0.3, 0.0],
+    [0.2, 1.1, 0.1],
+    [0.4, 0.6, 0.8]
+])
+b_p = np.array([0.6, 0.8, 0.3])
+F = np.array([
+    [0.04, 0.01, 0.00],
+    [0.01, 0.03, 0.01],
+    [0.00, 0.01, 0.05]
+])
+
+M = X_f.shape[0]
+h = cp.Variable(M)
+
+residual = b_p - X_f.T @ h
+objective = cp.Minimize(cp.quad_form(residual, F))
+constraints = [h >= 0.10, cp.sum(h) == 1.0]
+
+problem = cp.Problem(objective, constraints)
+problem.solve()
+
+# Validate solution
+if h.value is None:
+    raise ValueError("Optimisation failed or returned no solution.")
+
+h_val = np.array(h.value).flatten()
+print("h_val:", h_val)
+print("residual:", b_p - X_f.T @ h_val)
+
