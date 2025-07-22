@@ -89,40 +89,50 @@ if __name__ == '__main__':
     run_server()
 
 
-
-
-
 import numpy as np
 import cvxpy as cp
 
-# Dummy data (M futures, K factors)
-X_f = np.array([
-    [1.0, 0.3, 0.0],
-    [0.2, 1.1, 0.1],
-    [0.4, 0.6, 0.8]
-])
+# Dummy data (K=3 factors, M=8 futures)
 b_p = np.array([0.6, 0.8, 0.3])
+X_f = np.random.randn(8, 3) * 0.5 + 0.1  # 8 futures × 3 factors
 F = np.array([
     [0.04, 0.01, 0.00],
     [0.01, 0.03, 0.01],
     [0.00, 0.01, 0.05]
 ])
+F = 0.5 * (F + F.T)  # make symmetric
 
+# Wrap covariance matrix as PSD
+F_psd = cp.psd_wrap(F)
+
+# Hedge variable (continuous)
 M = X_f.shape[0]
 h = cp.Variable(M)
 
+# Binary inclusion variable for each future
+z = cp.Variable(M, boolean=True)
+
+# Residual factor exposure
 residual = b_p - X_f.T @ h
-objective = cp.Minimize(cp.quad_form(residual, F))
-constraints = [h >= 0.10, cp.sum(h) == 1.0]
 
+# Objective: minimise factor risk
+objective = cp.Minimize(cp.quad_form(residual, F_psd))
+
+# Constraints
+big_M = 1.0  # max absolute weight per future
+constraints = [
+    h <=  z * big_M,
+    h >= -z * big_M,
+    cp.sum(z) <= 5,         # use at most 5 futures
+    cp.norm(h, 1) >= 0.2,   # optional: minimum activity
+    cp.sum(h) == 0          # optional: dollar-neutral
+]
+
+# Solve with ECOS_BB (MIQP)
 problem = cp.Problem(objective, constraints)
-problem.solve()
+problem.solve(solver=cp.ECOS_BB, verbose=True)
 
-# Validate solution
-if h.value is None:
-    raise ValueError("Optimisation failed or returned no solution.")
-
-h_val = np.array(h.value).flatten()
-print("h_val:", h_val)
-print("residual:", b_p - X_f.T @ h_val)
-
+# Output
+print("Solver status:", problem.status)
+print("Selected weights:", h.value.round(4))
+print("Used futures:", np.where(np.abs(h.value) > 1e-4)[0])
