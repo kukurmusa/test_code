@@ -2,63 +2,85 @@ import cvxpy as cp
 import numpy as np
 import pandas as pd
 
-np.random.seed(42)
+np.random.seed(1)
 
 # --------------------------
-# Dummy Input Data
+# Dummy Input Data (Controlled)
 # --------------------------
 
-# Assume 5 assets in basket and 6 futures in hedge
 n_assets = 5
 m_futures = 6
-k_factors = 4  # number of Barra factors
+k_factors = 3
 
-# Random basket weights (long-only)
-w_b = np.array([0.2, 0.15, 0.25, 0.2, 0.2])  # sum to 1
+# Basket weights
+w_b = np.array([0.3, 0.25, 0.2, 0.15, 0.1])
 
-# Dummy Barra exposures for basket and hedge
-B_b = np.random.randn(n_assets, k_factors)   # 5 x 4
-B_h = np.random.randn(m_futures, k_factors)  # 6 x 4
+# Basket exposures (5 assets × 3 factors)
+B_b = np.array([
+    [1.0, 0.5, -0.2],
+    [0.8, 0.3, -0.1],
+    [1.2, 0.7, -0.3],
+    [0.6, 0.2, 0.0],
+    [1.1, 0.4, -0.1]
+])
 
-# Dummy factor covariance matrix (positive definite)
-A = np.random.randn(k_factors, k_factors)
-Cov_F = A.T @ A  # 4 x 4 positive semi-definite
+# Futures exposures (6 contracts × 3 factors)
+B_h = np.array([
+    [-1.0, -0.5, 0.2],
+    [-0.8, -0.3, 0.1],
+    [-1.2, -0.6, 0.3],
+    [0.0, 0.1, -0.5],
+    [0.5, -0.1, -0.3],
+    [-0.7, -0.2, 0.2]
+])
+
+# Factor covariance (positive definite 3x3)
+Cov_F = np.array([
+    [0.04, 0.01, 0.0],
+    [0.01, 0.03, 0.0],
+    [0.0,  0.0,  0.02]
+])
 
 # --------------------------
 # Optimization
 # --------------------------
 
-w_h = cp.Variable(m_futures)  # hedge weights
-z = cp.Variable(m_futures, boolean=True)  # binary selection vars
-M = 10  # big-M for sparsity
+w_h = cp.Variable(m_futures)
+z = cp.Variable(m_futures, boolean=True)
+M = 5
 
-# Net factor exposure (after hedge)
 net_exposure = B_b.T @ w_b + B_h.T @ w_h
+risk_expr = cp.quad_form(net_exposure, Cov_F)
 
-# Objective: Minimise factor risk
-risk = cp.quad_form(net_exposure, Cov_F)
-
-# Constraints
 constraints = [
-    cp.abs(w_h) <= M * z,  # link weights to binary variables
-    cp.sum(z) <= 3,        # select at most 3 hedge instruments
-    # cp.sum(w_h) == 0,    # optional: dollar neutral
+    cp.abs(w_h) <= M * z,
+    cp.sum(z) <= 3
 ]
 
-# Solve
-problem = cp.Problem(cp.Minimize(risk), constraints)
+problem = cp.Problem(cp.Minimize(risk_expr), constraints)
 problem.solve(solver=cp.ECOS_BB)
 
 # --------------------------
 # Output
 # --------------------------
 
-# Show hedge weights and selected instruments
+# Risk before hedge
+exposure_before = B_b.T @ w_b
+risk_before = exposure_before.T @ Cov_F @ exposure_before
+
+# Risk after hedge
+exposure_after = exposure_before + B_h.T @ w_h.value
+risk_after = exposure_after.T @ Cov_F @ exposure_after
+
+# Results
 df_result = pd.DataFrame({
     'Future': [f'H{i+1}' for i in range(m_futures)],
     'Weight': np.round(w_h.value, 4),
     'Selected': z.value.astype(int)
 })
 
-print("Optimized Hedge Portfolio:")
+print("\nOptimized Hedge Portfolio (max 3 futures):")
 print(df_result[df_result['Selected'] == 1])
+
+print(f"\nFactor Risk Before Hedge:  {risk_before:.6f}")
+print(f"Factor Risk After Hedge:   {risk_after:.6f}")
