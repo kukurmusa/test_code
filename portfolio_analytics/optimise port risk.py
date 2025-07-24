@@ -1,55 +1,43 @@
 import cvxpy as cp
+import numpy as np
+import pandas as pd
 
-# Constants
-P = 7                    # Portfolio assets
-H = 23                   # Hedge assets
-N = P + H                # Total
-K = 5                    # Number of factors
-k = 5                    # Max number of hedge instruments to select
-M = 1e4                  # Big-M value
+# Simulate data
+P, H, K, k = 7, 23, 5, 5
+N = P + H
+M = 1e4
+np.random.seed(42)
 
-# Extract numpy arrays from dataframes
-X = df_exposures.values
-specVar = df_specvar["specVar"].values
-w = df_portfolio["weight"].values
-F = df_factor_cov.values
+# Mock data
+X = np.random.randn(N, K)
+F = np.diag(np.random.uniform(0.01, 0.05, K))
+specVar = np.random.uniform(0.01, 0.03, N)
+w = np.zeros(N)
+w[:P] = np.random.dirichlet(np.ones(P))
 
-# Covariance matrix: X F X' + D
+# Covariance
 D = np.diag(specVar)
 cov_total = X @ F @ X.T + D
 
-# Optimisation variables
-h = cp.Variable(N)                  # hedge weights
-z = cp.Variable(H, boolean=True)   # selection binary
+# Optimisation
+h = cp.Variable(N)
+z = cp.Variable(H, boolean=True)
 
-# Constraints
-constraints = []
-
-# Hedge instruments are only allowed on last H assets
-for i in range(P):
-    constraints.append(h[i] == 0)
-
-for i in range(H):
-    idx = P + i
-    constraints += [
-        h[idx] <=  z[i] * M,
-        h[idx] >= -z[i] * M
-    ]
-
+constraints = [h[i] == 0 for i in range(P)]
+constraints += [h[P+i] <= z[i]*M for i in range(H)]
+constraints += [h[P+i] >= -z[i]*M for i in range(H)]
 constraints.append(cp.sum(z) <= k)
 
-# Objective: minimise total portfolio risk after hedge
 total_w = w + h
 objective = cp.Minimize(cp.quad_form(total_w, cov_total))
-
-# Solve with ECOS_BB
 prob = cp.Problem(objective, constraints)
 prob.solve(solver="ECOS_BB")
 
 # Output
-selected_hedge_assets = [hedge_assets[i] for i in range(H) if round(z.value[i]) == 1]
-hedge_weights = {hedge_assets[i]: round(h.value[P + i], 6) for i in range(H) if round(z.value[i]) == 1}
-risk_before = np.sqrt(w.T @ cov_total @ w)
-risk_after = np.sqrt(total_w.value.T @ cov_total @ total_w.value)
-
-(selected_hedge_assets, hedge_weights, risk_before, risk_after)
+hedge_assets = [f"Hedge_{i+1}" for i in range(H)]
+selected_hedges = [hedge_assets[i] for i in range(H) if round(z.value[i]) == 1]
+weights = {hedge_assets[i]: round(h.value[P+i], 6) for i in range(H) if round(z.value[i]) == 1}
+print("Selected Hedge Instruments:", selected_hedges)
+print("Hedge Weights:", weights)
+print("Risk Before:", np.sqrt(w.T @ cov_total @ w))
+print("Risk After :", np.sqrt(total_w.value.T @ cov_total @ total_w.value))
