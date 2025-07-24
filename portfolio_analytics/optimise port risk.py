@@ -52,8 +52,14 @@ M = 5
 net_exposure = B_b.T @ w_b + B_h.T @ w_h
 risk_expr = cp.quad_form(net_exposure, Cov_F)
 
+min_weight = 0.05  # 5%
+M = 5.0            # Max hedge notional weight
+
 constraints = [
-    cp.abs(w_h) <= M * z,
+    cp.abs(w_h[i]) <= M * z[i] for i in range(m_futures)
+] + [
+    cp.abs(w_h[i]) >= min_weight * z[i] for i in range(m_futures)
+] + [
     cp.sum(z) <= 3
 ]
 
