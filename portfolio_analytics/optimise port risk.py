@@ -1,60 +1,36 @@
-import numpy as np
-import pandas as pd
 import cvxpy as cp
+import numpy as np
 
-# Parameters
-P, H, K = 573, 20, 5
-N = P + H
-k = 5
-M = 1e4
-adv_limit = 0.2
+# Assume you already have:
+# B_b, w_b, B_h, Cov_F
 
-np.random.seed(42)
-X = np.random.randn(N, K)
-F = np.diag(np.random.uniform(0.01, 0.05, K))
-specVar = np.random.uniform(0.01, 0.03, N)
-w = np.zeros(N)
-w[:P] = np.random.dirichlet(np.ones(P))
-adv_notional = np.random.uniform(1e5, 5e6, size=H)
-max_hedge_size = adv_limit * adv_notional
-min_hedge_size = 0.05 * adv_notional
+# Inputs
+k = Cov_F.shape[0]
+m = B_h.shape[0]
 
-D = np.diag(specVar)
-cov_total = X @ F @ X.T + D
+# Decision variable: weights of hedge futures
+w_h = cp.Variable(m)
 
-# Step 1: Greedy pre-selection based on exposure similarity
-b_p = w @ X[:P]
-scores = np.array([np.abs(np.dot(X[P+i], b_p)) for i in range(H)])
-top_indices = scores.argsort()[::-1][:8]
-selected_idxs = [P + i for i in top_indices]
+# Total factor exposure after hedge
+net_exposure = B_b.T @ w_b + B_h.T @ w_h
 
-# Optimisation
-z = cp.Variable(len(selected_idxs), boolean=True)
-h = cp.Variable(N)
-constraints = [h[i] == 0 for i in range(P)]
+# Objective: Minimise factor risk (quadratic form)
+risk = cp.quad_form(net_exposure, Cov_F)
 
-for j, idx in enumerate(selected_idxs):
-    constraints += [
-        h[idx] <= z[j] * max_hedge_size[top_indices[j]],
-        h[idx] >= -z[j] * max_hedge_size[top_indices[j]],
-        cp.abs(h[idx]) >= z[j] * min_hedge_size[top_indices[j]]
-    ]
+# Constraint: Only 3 non-zero hedge weights
+# Use L0 approximation: sum of binary indicators
+z = cp.Variable(m, boolean=True)
+M = 10  # big-M constant
+constraints = [
+    cp.abs(w_h) <= M * z,  # if z[i]=0, then w_h[i]=0
+    cp.sum(z) <= 3
+]
 
-constraints.append(cp.sum(z) <= k)
+# Optional: dollar-neutral
+# constraints += [cp.sum(w_h) == 0]
 
-total_w = w + h
-objective = cp.Minimize(cp.quad_form(total_w, cov_total))
-prob = cp.Problem(objective, constraints)
-prob.solve(solver="ECOS_BB")
+# Solve
+problem = cp.Problem(cp.Minimize(risk), constraints)
+problem.solve(solver=cp.ECOS_BB)
 
-# Output
-selected_hedges = [f"Hedge_{top_indices[i]+1}" for i in range(len(top_indices)) if round(z.value[i]) == 1]
-weights = {f"Hedge_{top_indices[i]+1}": round(h.value[selected_idxs[i]], 4)
-           for i in range(len(top_indices)) if round(z.value[i]) == 1}
-risk_before = np.sqrt(w.T @ cov_total @ w)
-risk_after = np.sqrt(total_w.value.T @ cov_total @ total_w.value)
-
-print("Selected Hedge Instruments:", selected_hedges)
-print("Hedge Weights:", weights)
-print("Risk Before:", round(risk_before, 4))
-print("Risk After :", round(risk_after, 4))
+print("Optimal hedge weights:", w_h.value)
