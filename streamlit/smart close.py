@@ -5,6 +5,16 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+
+query_params = st.query_params
+
+# Read from URL if available, otherwise fall back to default
+input_date = query_params.get("date", [str(datetime.today().date())])[0]
+input_clordid = query_params.get("clordid", [""])[0]
+
+# Convert string to proper date object
+input_date = datetime.strptime(input_date, "%Y-%m-%d").date()
+
 # ---- Simulated Data ----
 np.random.seed(42)
 time_index = pd.date_range("2024-01-01 09:30", periods=60, freq="1min")
