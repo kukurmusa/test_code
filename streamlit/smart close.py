@@ -54,8 +54,22 @@ st.title("🧠 Algo Order Performance Tracker")
 
 # ---- Read Query Params ----
 query_params = st.query_params
-input_date = query_params.get("date", [str(datetime.today().date())])[0]
-input_clordid = query_params.get("clordid", [""])[0]
+# Safely parse query parameters
+query_params = st.query_params
+
+# Get 'date' from URL if present, else fallback
+if "date" in query_params:
+    try:
+        input_date = datetime.strptime(query_params["date"], "%Y-%m-%d").date()
+    except ValueError:
+        input_date = datetime.today().date()
+else:
+    input_date = datetime.today().date()
+
+# Get 'clordid' from URL
+input_clordid = query_params["clordid"] if "clordid" in query_params else ""
+
+
 input_date = datetime.strptime(input_date, "%Y-%m-%d").date()
 
 # ---- Sidebar Inputs ----
