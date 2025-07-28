@@ -5,20 +5,11 @@ import plotly.graph_objects as go
 import time
 from datetime import datetime, timedelta
 
-# --- PAGE CONFIG ---
 st.set_page_config(layout="wide", page_title="Order Book Playback", page_icon="📈")
-
 st.title("📈 BTC/USDT Order Book Playback")
 
-# --- STATE INITIALISATION ---
-if "order_book_history" not in st.session_state:
-    st.session_state.order_book_history = {}
-if "current_timestamp" not in st.session_state:
-    st.session_state.current_timestamp = None
-if "is_playing" not in st.session_state:
-    st.session_state.is_playing = False
-
-# --- GENERATE MOCK TIMESTAMPED ORDER BOOK ---
+# --- CACHED DATA GENERATOR ---
+@st.cache_data(show_spinner=False)
 def generate_order_book_history(base_price=30000, steps=20, interval_seconds=60, spread=1.0, depth=5):
     history = {}
     start_time = datetime.now().replace(second=0, microsecond=0)
@@ -34,18 +25,24 @@ def generate_order_book_history(base_price=30000, steps=20, interval_seconds=60,
         history[ts] = (bid_df, ask_df)
     return history
 
-# Generate once
-if not st.session_state.order_book_history:
+# --- STATE SETUP ---
+if "order_book_history" not in st.session_state:
     st.session_state.order_book_history = generate_order_book_history()
-    st.session_state.current_timestamp = list(st.session_state.order_book_history.keys())[0]
+    st.session_state.timestamps = sorted(st.session_state.order_book_history.keys())
+    st.session_state.current_timestamp = st.session_state.timestamps[0]
+if "is_playing" not in st.session_state:
+    st.session_state.is_playing = False
 
-timestamps = sorted(st.session_state.order_book_history.keys())
-timestamp_strs = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps]
-current_index = timestamps.index(st.session_state.current_timestamp)
+# --- BUTTON TO RELOAD DATA ---
+if st.button("🔄 Pull New Data"):
+    st.cache_data.clear()
+    st.session_state.order_book_history = generate_order_book_history()
+    st.session_state.timestamps = sorted(st.session_state.order_book_history.keys())
+    st.session_state.current_timestamp = st.session_state.timestamps[0]
+    st.session_state.is_playing = False
 
 # --- PLAY/PAUSE CONTROLS ---
 col1, col2 = st.columns([1, 5])
-
 with col1:
     if st.session_state.is_playing:
         if st.button("⏸️ Pause"):
@@ -54,28 +51,30 @@ with col1:
         if st.button("▶️ Play"):
             st.session_state.is_playing = True
 
-with col2:
-    selected_str = st.select_slider(
-        "Select Timestamp",
-        options=timestamp_strs,
-        value=st.session_state.current_timestamp.strftime("%Y-%m-%d %H:%M:%S")
-    )
-    st.session_state.current_timestamp = datetime.strptime(selected_str, "%Y-%m-%d %H:%M:%S")
+# --- TIMESTAMP SLIDER ---
+timestamp_strs = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in st.session_state.timestamps]
+current_index = st.session_state.timestamps.index(st.session_state.current_timestamp)
 
-# --- PLAYBACK ANIMATION ---
+selected_str = st.select_slider(
+    "Select Timestamp",
+    options=timestamp_strs,
+    value=st.session_state.current_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+)
+st.session_state.current_timestamp = datetime.strptime(selected_str, "%Y-%m-%d %H:%M:%S")
+
+# --- PLAYBACK LOOP ---
 if st.session_state.is_playing:
-    next_index = (current_index + 1) % len(timestamps)
-    st.session_state.current_timestamp = timestamps[next_index]
+    next_index = (current_index + 1) % len(st.session_state.timestamps)
+    st.session_state.current_timestamp = st.session_state.timestamps[next_index]
     time.sleep(1)
     st.experimental_rerun()
 
-# --- DISPLAY ORDER BOOK SNAPSHOT ---
+# --- DISPLAY SNAPSHOT ---
 bids_df, asks_df = st.session_state.order_book_history[st.session_state.current_timestamp]
 
 col1, col2 = st.columns(2)
 col1.subheader(f"💰 Top Bids @ {st.session_state.current_timestamp.strftime('%H:%M:%S')}")
 col1.table(bids_df)
-
 col2.subheader(f"🧾 Top Asks @ {st.session_state.current_timestamp.strftime('%H:%M:%S')}")
 col2.table(asks_df)
 
