@@ -2,44 +2,88 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import time
 from datetime import datetime, timedelta
+import time
+from qpython import qconnection
 
-st.set_page_config(layout="wide", page_title="Order Book Playback", page_icon="📈")
-st.title("📈 BTC/USDT Order Book Playback")
+# --- PAGE CONFIG ---
+st.set_page_config(layout="wide", page_title="L2 Order Book Playback", page_icon="📈")
+st.title("📉 L2 Order Book Playback")
 
-# --- CACHED DATA GENERATOR ---
-@st.cache_data(show_spinner=False)
-def generate_order_book_history(base_price=30000, steps=20, interval_seconds=60, spread=1.0, depth=5):
-    history = {}
-    start_time = datetime.now().replace(second=0, microsecond=0)
-    for i in range(steps):
-        ts = start_time + timedelta(seconds=i * interval_seconds)
-        mid_price = base_price + np.random.normal(0, 10)
-        bids, asks = [], []
-        for j in range(depth):
-            bids.append([round(mid_price - j * spread, 2), round(np.random.uniform(1, 10), 2)])
-            asks.append([round(mid_price + j * spread, 2), round(np.random.uniform(1, 10), 2)])
-        bid_df = pd.DataFrame(bids, columns=["Price", "Qty"])
-        ask_df = pd.DataFrame(asks, columns=["Price", "Qty"])
-        history[ts] = (bid_df, ask_df)
-    return history
+# --- GET QUERY PARAMS FROM URL ---
+query_params = st.query_params
+input_date = datetime.today().date()
+input_sym = "BTCUSD"
+input_clordid = ""
 
-# --- STATE SETUP ---
+if "date" in query_params:
+    try:
+        input_date = datetime.strptime(query_params["date"], "%Y-%m-%d").date()
+    except:
+        pass
+
+if "sym" in query_params:
+    input_sym = query_params["sym"]
+
+# --- SIDEBAR INPUT ---
+with st.sidebar:
+    st.header("🔎 Symbol & Filters")
+    input_date = st.date_input("Select Date", input_date)
+    input_sym = st.text_input("Enter Symbol", input_sym)
+    input_clordid = st.text_input("Enter ClOrdID (optional)", input_clordid)
+    run_button = st.button("🔄 Run Analysis", type="primary")
+
+# --- CACHED FUNCTION TO SIMULATE KDB RESPONSE ---
+@st.cache_data(show_spinner=True)
+def simulate_kdb_response(date, sym):
+    q = qconnection.QConnection(host="ldnqlpatcqa901", port=12347, username="eueqt", password="eueqt", pandas=True)
+    q.open()
+    
+    query = f"""
+    .file.loadScript[system "getenv HOME", "/svn/algo/trunk/q/util/LV2_util.q"];
+    X: queryX[`{date.strftime("%Y.%m.%d")}; "{sym}"];
+    """
+    L2Book = q(query)
+    q.close()
+
+    orderBook = L2Book["orderBook"]
+    rawOrderBooks = L2Book["rawOrderBooks"]
+    
+    return {
+        "orderBook": orderBook,
+        "rawOrderBooks": rawOrderBooks
+    }
+
+# --- INITIALISE STATE ---
+if "order_book" not in st.session_state:
+    st.session_state.order_book = {}
 if "order_book_history" not in st.session_state:
-    st.session_state.order_book_history = generate_order_book_history()
-    st.session_state.timestamps = sorted(st.session_state.order_book_history.keys())
-    st.session_state.current_timestamp = st.session_state.timestamps[0]
+    st.session_state.order_book_history = None
+if "current_timestamp" not in st.session_state:
+    st.session_state.current_timestamp = None
 if "is_playing" not in st.session_state:
     st.session_state.is_playing = False
 
-# --- BUTTON TO RELOAD DATA ---
-if st.button("🔄 Pull New Data"):
-    st.cache_data.clear()
-    st.session_state.order_book_history = generate_order_book_history()
-    st.session_state.timestamps = sorted(st.session_state.order_book_history.keys())
-    st.session_state.current_timestamp = st.session_state.timestamps[0]
-    st.session_state.is_playing = False
+# --- ON BUTTON CLICK: LOAD NEW DATA ---
+if run_button:
+    st.session_state.order_book = simulate_kdb_response(input_date, input_clordid)
+    st.session_state.order_book_history = st.session_state.order_book["rawOrderBooks"]
+    st.session_state.current_timestamp = st.session_state.order_book_history["time"].iloc[0]
+
+# --- EXIT IF NO DATA ---
+if st.session_state.order_book_history is None:
+    st.info("Please enter inputs and run analysis.")
+    st.stop()
+
+# --- TIMESTAMP SLIDER SETUP ---
+timestamps = st.session_state.order_book_history["time"].tolist()
+timestamp_strs = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in timestamps]
+
+# Set slider default if needed
+if st.session_state.current_timestamp not in timestamps:
+    st.session_state.current_timestamp = timestamps[0]
+
+current_index = timestamps.index(st.session_state.current_timestamp)
 
 # --- PLAY/PAUSE CONTROLS ---
 col1, col2 = st.columns([1, 5])
@@ -51,47 +95,52 @@ with col1:
         if st.button("▶️ Play"):
             st.session_state.is_playing = True
 
-# --- TIMESTAMP SLIDER ---
-timestamp_strs = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in st.session_state.timestamps]
-current_index = st.session_state.timestamps.index(st.session_state.current_timestamp)
+with col2:
+    selected_str = st.select_slider(
+        "Select Timestamp",
+        options=timestamp_strs,
+        value=st.session_state.current_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    )
+    st.session_state.current_timestamp = datetime.strptime(selected_str, "%Y-%m-%d %H:%M:%S")
 
-selected_str = st.select_slider(
-    "Select Timestamp",
-    options=timestamp_strs,
-    value=st.session_state.current_timestamp.strftime("%Y-%m-%d %H:%M:%S")
-)
-st.session_state.current_timestamp = datetime.strptime(selected_str, "%Y-%m-%d %H:%M:%S")
-
-# --- PLAYBACK LOOP ---
+# --- PLAYBACK ANIMATION ---
 if st.session_state.is_playing:
-    next_index = (current_index + 1) % len(st.session_state.timestamps)
-    st.session_state.current_timestamp = st.session_state.timestamps[next_index]
+    next_index = (current_index + 1) % len(timestamps)
+    st.session_state.current_timestamp = timestamps[next_index]
     time.sleep(1)
     st.experimental_rerun()
 
-# --- DISPLAY SNAPSHOT ---
-bids_df, asks_df = st.session_state.order_book_history[st.session_state.current_timestamp]
+# --- DISPLAY ORDER BOOK SNAPSHOT ---
+bookData = st.session_state.order_book_history
+current_time = st.session_state.current_timestamp
 
+book_snapshot = bookData[bookData["time"] == current_time]
+
+bids_df = book_snapshot[(book_snapshot["side"] == "B") & (book_snapshot["price"] > 0)].sort_values("price", ascending=False).head(20)
+asks_df = book_snapshot[(book_snapshot["side"] == "S") & (book_snapshot["price"] > 0)].sort_values("price", ascending=True).head(20)
+
+# --- DISPLAY TABLES ---
 col1, col2 = st.columns(2)
-col1.subheader(f"💰 Top Bids @ {st.session_state.current_timestamp.strftime('%H:%M:%S')}")
-col1.table(bids_df)
-col2.subheader(f"🧾 Top Asks @ {st.session_state.current_timestamp.strftime('%H:%M:%S')}")
-col2.table(asks_df)
+col1.subheader(f"💰 Top Bid Book @ {current_time.strftime('%H:%M:%S')}")
+col1.table(bids_df[["price", "size"]])
+
+col2.subheader(f"🧾 Top Ask Book @ {current_time.strftime('%H:%M:%S')}")
+col2.table(asks_df[["price", "size"]])
 
 # --- DEPTH CHART ---
 st.subheader("📊 Depth Chart")
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(
-    x=bids_df.sort_values("Price")["Price"],
-    y=bids_df.sort_values("Price")["Qty"].cumsum(),
+    x=bids_df.sort_values("price")["price"],
+    y=bids_df.sort_values("price")["size"].cumsum(),
     mode="lines+markers",
     name="Bids",
     fill="tozeroy"
 ))
 fig.add_trace(go.Scatter(
-    x=asks_df.sort_values("Price")["Price"],
-    y=asks_df.sort_values("Price")["Qty"].cumsum(),
+    x=asks_df.sort_values("price")["price"],
+    y=asks_df.sort_values("price")["size"].cumsum(),
     mode="lines+markers",
     name="Asks",
     fill="tozeroy"
