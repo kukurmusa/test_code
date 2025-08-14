@@ -5,7 +5,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, time as dtime
 import random
 import plotly.express as px
 import hashlib
@@ -29,9 +29,12 @@ COMPANIES = [
     {"ticker": "SHEL", "name": "Shell plc"},
     {"ticker": "AAL",  "name": "Anglo American plc"},
 ]
+TICKER_BY_NAME = {c["name"]: c["ticker"] for c in COMPANIES}
+NAME_BY_TICKER = {c["ticker"]: c["name"] for c in COMPANIES}
+COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
 
-# Fixed mock controls (kept out of the UI)
-N_ITEMS = 60                # total items generated per “subject”
+# Fixed mock controls
+N_ITEMS = 60
 MU = 0.05
 SIGMA = 0.35
 SEED = 42
@@ -39,11 +42,20 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
+# --- Session defaults
+for k, v in {
+    "news_df": None,
+    "subject_display": "",
+    "subject_code": "SUBJ",
+    "summary_text": "",
+    "generated_at": None,
+}.items():
+    st.session_state.setdefault(k, v)
+
 # -------------------------------------
 # Helpers
 # -------------------------------------
 def stable_int_from_string(s: str) -> int:
-    """Deterministic, cross-session integer from a string."""
     return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16)
 
 @st.cache_data(show_spinner=False)
@@ -51,14 +63,12 @@ def generate_mock_news(subject: str, code: str, kind: str,
                        n: int, start_dt_utc: datetime, end_dt_utc: datetime,
                        mu: float, sigma: float, seed_val: int) -> pd.DataFrame:
     """Generate mock articles for a company/topic between start/end (UTC)."""
-    # Stable RNG per subject
     subj_seed = seed_val + stable_int_from_string(f"{kind}:{code}") % 10_000_000
     rng = np.random.default_rng(subj_seed)
 
-    # Random timestamps uniformly within the window
-    span_seconds = (end_dt_utc - start_dt_utc).total_seconds()
-    rand_secs = rng.random(n) * span_seconds
-    times = [start_dt_utc + timedelta(seconds=float(s)) for s in rand_secs]
+    span_seconds = max(1, int((end_dt_utc - start_dt_utc).total_seconds()))
+    rand_secs = rng.integers(0, span_seconds, size=n)
+    times = [start_dt_utc + timedelta(seconds=int(s)) for s in rand_secs]
     times = sorted(times, reverse=True)
 
     sources = ["Bloomberg", "Reuters", "FT", "WSJ", "CNBC", "MarketWatch", "Morningstar", "City A.M.", "The Times"]
@@ -91,7 +101,7 @@ def generate_mock_news(subject: str, code: str, kind: str,
             f"{random.choice(body_bits)}"
         )
         rows.append({
-            "datetime_utc": times[i].replace(microsecond=0),
+            "datetime_utc": times[i].replace(microsecond=0, tzinfo=timezone.utc),
             "source": src,
             "subject": subject,
             "headline": headline,
@@ -105,9 +115,8 @@ def generate_mock_news(subject: str, code: str, kind: str,
         })
 
     df = pd.DataFrame(rows)
-    # Convenience local-time column for display (naive)
-    df["datetime_local"] = pd.to_datetime(df["datetime_utc"]).dt.tz_convert(None)
-    return df
+    df["datetime_local"] = pd.to_datetime(df["datetime_utc"]).dt.tz_convert(None)  # naive local for display
+    return df.sort_values("datetime_utc", ascending=False)
 
 def mock_llm_summary(df: pd.DataFrame, subject_display: str, prompt: str) -> str:
     avg = df["sentiment"].mean()
@@ -142,162 +151,178 @@ def mock_llm_summary(df: pd.DataFrame, subject_display: str, prompt: str) -> str
     return "\n".join(lines)
 
 # -------------------------------------
-# Sidebar – Scope + Date range
+# Sidebar — Controls Form (prevents rerun until submit)
+# -------------------------------------
+# Sidebar — Controls (toggle outside form; inputs inside form)
+# -------------------------------------
+# -------------------------------------
+# Sidebar — Controls (no "Both", presets only)
 # -------------------------------------
 with st.sidebar:
-    st.header("🔎 Scope")
+    st.header("🔎 Scope & Range")
 
-    mode = st.radio("Analyse by", ["Company", "Topic", "Both"], horizontal=True)
+    # Outside the form so the UI switches immediately when toggled
+    mode = st.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
 
-    # Defaults
-    subject_company_name = None
-    subject_company_code = None
-    subject_topic_name = None
-    subject_topic_code = None
+    if mode == "Company":
+        # Toggle outside the form so it reruns and swaps the widget
+        st.session_state.setdefault("company_input_mode", "Pick from list")
+        company_input_mode = st.radio(
+            "Company input",
+            ["Pick from list", "Type manually"],
+            horizontal=False,
+            key="company_input_mode",
+        )
 
-    if mode in ("Company", "Both"):
-        options = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
-        choice = st.selectbox("Company", options, index=0)
-        idx = options.index(choice)
-        subject_company_name = COMPANIES[idx]["name"]
-        subject_company_code = COMPANIES[idx]["ticker"]
+    # Rest in a form so it doesn’t rerun until submit
+    with st.form(key="controls_form", clear_on_submit=False):
+        company_name = company_ticker = None
+        topic_name = topic_code = None
 
-    if mode in ("Topic", "Both"):
-        subject_topic_name = st.text_input("Topic", placeholder="e.g., AI in data centres")
-        subject_topic_code = (subject_topic_name or "TOPIC").strip()
+        # --- Company inputs (only for Company)
+        if mode == "Company":
+            if st.session_state["company_input_mode"] == "Pick from list":
+                COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
+                company_choice = st.selectbox("Company", COMPANY_OPTIONS, index=0, key="company_select")
+                name = company_choice.split(" (")[0]
+                code = company_choice.split("(")[-1].rstrip(")")
+            else:
+                typed = st.text_area(
+                    "Company (name or ticker)",
+                    placeholder="e.g., Apple Inc. or AAPL",
+                    key="company_text",
+                    height=80,
+                ).strip()
+                # Resolve to name/ticker if known; otherwise use literal
+                code = typed.upper() if typed.upper() in NAME_BY_TICKER else None
+                name = NAME_BY_TICKER.get(typed.upper()) or TICKER_BY_NAME.get(typed) or typed
+                if code is None:
+                    code = (typed.upper()[:8] or "COMPANY")
+            company_name, company_ticker = name, code
 
-    st.markdown("---")
-    # Date range picker (UTC inclusive). Default = last 7 days.
-    today_utc = datetime.now(timezone.utc).date()
-    default_start = today_utc - timedelta(days=6)
-    start_date, end_date = st.date_input(
-        "Date range (UTC)",
-        value=(default_start, today_utc),
-        min_value=today_utc - timedelta(days=365),
-        max_value=today_utc
-    )
+        # --- Topic inputs (only for Topic)
+        if mode == "Topic":
+            topic_name = st.text_input("Topic", placeholder="e.g., AI in data centres", key="topic_name").strip()
+            topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
 
-    # Safety: ensure tuple even if single date returned
-    if isinstance(start_date, date) and isinstance(end_date, date):
-        start_dt_utc = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
-        end_dt_utc = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
-    else:
-        # Fallback to last 7 days
-        start_dt_utc = datetime.combine(default_start, datetime.min.time(), tzinfo=timezone.utc)
-        end_dt_utc = datetime.combine(today_utc, datetime.max.time(), tzinfo=timezone.utc)
+        st.markdown("---")
 
-    st.markdown("---")
-    generate = st.button("🔎 Generate Mock News", use_container_width=True)
+        # Date presets only
+        from datetime import datetime as dt, timedelta, timezone, time as dtime
+        today_utc = dt.now(timezone.utc).date()
+        preset = st.selectbox(
+            "Date preset (UTC)",
+            ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
+            index=3,
+            key="date_preset",
+        )
+        if preset == "Today":
+            start_dt_utc = dt.combine(today_utc, dtime.min, tzinfo=timezone.utc)
+            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
+        elif preset == "Yesterday":
+            y = today_utc - timedelta(days=1)
+            start_dt_utc = dt.combine(y, dtime.min, tzinfo=timezone.utc)
+            end_dt_utc   = dt.combine(y, dtime.max, tzinfo=timezone.utc)
+        elif preset == "Last 24 hours":
+            end_dt_utc   = dt.now(timezone.utc)
+            start_dt_utc = end_dt_utc - timedelta(hours=24)
+        elif preset == "Last 7 days":
+            start_dt_utc = dt.combine(today_utc - timedelta(days=6), dtime.min, tzinfo=timezone.utc)
+            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
+        else:  # Last 30 days
+            start_dt_utc = dt.combine(today_utc - timedelta(days=29), dtime.min, tzinfo=timezone.utc)
+            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
+
+        submitted = st.form_submit_button("🔎 Generate / Refresh", use_container_width=True)
 
 st.title("📰 Sentiment Analysis – Mock POC")
 
 # -------------------------------------
-# Generate upon click
+# Generate on submit (no rerun on mere widget changes)
 # -------------------------------------
-if generate:
+if submitted or st.session_state.get("news_df") is None:
     frames = []
-    subject_display_parts = []
+    subject_parts = []
+    subj_codes = []
 
-    if mode in ("Company", "Both") and subject_company_name:
+    if mode in ("Company", "Both") and company_name:
         frames.append(
             generate_mock_news(
-                subject=subject_company_name,
-                code=subject_company_code,
-                kind="company",
-                n=N_ITEMS,
-                start_dt_utc=start_dt_utc,
-                end_dt_utc=end_dt_utc,
+                subject=company_name, code=company_ticker, kind="company",
+                n=N_ITEMS, start_dt_utc=start_dt_utc, end_dt_utc=end_dt_utc,
                 mu=MU, sigma=SIGMA, seed_val=SEED
             )
         )
-        subject_display_parts.append(f"{subject_company_name} ({subject_company_code})")
-
-    if mode in ("Topic", "Both") and (subject_topic_name or "").strip():
+        subject_parts.append(f"{company_name} ({company_ticker})")
+    if mode in ("Topic", "Both") and (topic_name or "").strip():
         frames.append(
             generate_mock_news(
-                subject=subject_topic_name,
-                code=subject_topic_code,
-                kind="topic",
-                n=N_ITEMS,
-                start_dt_utc=start_dt_utc,
-                end_dt_utc=end_dt_utc,
+                subject=topic_name, code=topic_code, kind="topic",
+                n=N_ITEMS, start_dt_utc=start_dt_utc, end_dt_utc=end_dt_utc,
                 mu=MU, sigma=SIGMA, seed_val=SEED
             )
         )
-        subject_display_parts.append(f"Topic: {subject_topic_name}")
-    elif mode in ("Topic", "Both") and not (subject_topic_name or "").strip():
-        st.warning("Please enter a topic to generate mock news.")
+        subject_parts.append(f"Topic: {topic_name}")
+    if mode in ("Topic", "Both") and not (topic_name or "").strip():
+        st.warning("Please enter a topic.")
 
     if frames:
         news_df_all = pd.concat(frames, ignore_index=True).sort_values("datetime_utc", ascending=False)
         st.session_state["news_df"] = news_df_all
-        st.session_state["subject_display"] = " + ".join(subject_display_parts)
-        st.session_state["subject_code"] = "-".join(
-            [f for f in [subject_company_code, subject_topic_code] if f]
-        ) or "SUBJ"
-    else:
-        st.session_state["news_df"] = pd.DataFrame()
-        st.session_state["subject_display"] = None
+        st.session_state["subject_display"] = " + ".join(subject_parts) or "Selection"
+        st.session_state["subject_code"] = "-".join([c for c in [company_ticker if mode in ("Company","Both") else None,
+                                                                 topic_code if mode in ("Topic","Both") else None] if c]) or "SUBJ"
+        st.session_state["generated_at"] = datetime.now(timezone.utc)
+
+        # Auto-generate executive summary (no button)
+        default_prompt = (
+            "You are an equity research assistant. Read the news and produce a concise, executive-style brief "
+            "for a busy trading desk. Summarise key positives, key risks, and any near-term catalysts (1–4 weeks). "
+            "Finish with a 1-sentence bottom line."
+        )
+        st.session_state["summary_text"] = mock_llm_summary(st.session_state["news_df"], st.session_state["subject_display"], default_prompt)
 
 news_df = st.session_state.get("news_df")
-subject_display = st.session_state.get("subject_display") or ""
+subject_display = st.session_state.get("subject_display")
 subject_code = st.session_state.get("subject_code", "SUBJ")
 
 # -------------------------------------
 # Main view
 # -------------------------------------
 if news_df is not None and not news_df.empty:
-    # Filters
-    with st.expander("Filters", expanded=True):
-        c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-        # Scope filter only appears when multiple scopes exist
-        scopes = sorted(news_df["scope"].unique())
-        if len(scopes) > 1:
-            scopes_sel = c1.multiselect("Scope", scopes, default=scopes)
-        else:
-            scopes_sel = scopes
+    # Header KPIs (no filters; full dataset)
+    as_of_ts = pd.to_datetime(news_df["datetime_utc"]).max()
+    gen_at = st.session_state.get("generated_at")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Items", len(news_df))
+    k2.metric("Sentiment as of", as_of_ts.strftime("%d %b %Y %H:%M UTC"))
+    k3.metric("Generated at", gen_at.strftime("%d %b %Y %H:%M UTC") if gen_at else "—")
 
-        labels_sel = c2.multiselect("Labels", ["Positive", "Neutral", "Negative"],
-                                    default=["Positive", "Neutral", "Negative"])
-        sources_sel = c3.multiselect("Sources", sorted(news_df["source"].unique()),
-                                     default=list(sorted(news_df["source"].unique())))
-        min_s, max_s = c4.slider("Score range", -1.0, 1.0, (-1.0, 1.0), 0.05)
+    # Charts (no filters, colour by scope if Both)
+    scopes = sorted(news_df["scope"].unique())
+    color_arg = "scope" if len(scopes) > 1 else None
 
-    mask = news_df["label"].isin(labels_sel) & news_df["source"].isin(sources_sel) & news_df["sentiment"].between(min_s, max_s)
-    if len(scopes) > 1:
-        mask &= news_df["scope"].isin(scopes_sel)
-
-    view_df = news_df.loc[mask].copy()
-
-    # KPIs
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Items", len(view_df))
-    col2.metric("Avg sentiment", f"{view_df['sentiment'].mean():.2f}" if len(view_df) else "—")
-    col3.metric("% Positive", f"{(view_df['label'].eq('Positive').mean()*100):.0f}%" if len(view_df) else "—")
-    col4.metric("% Negative", f"{(view_df['label'].eq('Negative').mean()*100):.0f}%" if len(view_df) else "—")
-
-    # Charts
     st.subheader("Sentiment Score Distribution")
-    fig_hist = px.histogram(view_df, x="sentiment", nbins=30, marginal="rug", color="scope" if len(scopes) > 1 else None)
+    fig_hist = px.histogram(news_df, x="sentiment", nbins=30, marginal="rug", color=color_arg)
     fig_hist.update_layout(height=300, bargap=0.05)
     st.plotly_chart(fig_hist, use_container_width=True)
 
     st.subheader("Sentiment Box Plot")
-    fig_box = px.box(view_df, y="sentiment", points="all", color="scope" if len(scopes) > 1 else None)
+    fig_box = px.box(news_df, y="sentiment", points="all", color=color_arg)
     fig_box.update_layout(height=300)
     st.plotly_chart(fig_box, use_container_width=True)
 
     st.subheader("Sentiment over Time")
-    tmp = view_df.sort_values("datetime_utc").copy()
+    tmp = news_df.sort_values("datetime_utc").copy()
     tmp["ts"] = pd.to_datetime(tmp["datetime_utc"])
     fig_time = px.scatter(tmp, x="ts", y="sentiment", hover_data=["scope", "source", "headline"],
-                          trendline="lowess", color="scope" if len(scopes) > 1 else None)
+                          trendline="lowess", color=color_arg)
     fig_time.update_layout(height=320)
     st.plotly_chart(fig_time, use_container_width=True)
 
     st.subheader("Source Breakdown")
-    src_counts = view_df.groupby(["source", "label", "scope"], as_index=False).size() if len(scopes) > 1 \
-        else view_df.groupby(["source", "label"], as_index=False).size()
+    src_counts = news_df.groupby(["source", "label", "scope"], as_index=False).size() if len(scopes) > 1 \
+        else news_df.groupby(["source", "label"], as_index=False).size()
     fig_src = px.bar(src_counts, x="source", y="size",
                      color="label", barmode="stack",
                      facet_col="scope" if len(scopes) > 1 else None)
@@ -308,7 +333,7 @@ if news_df is not None and not news_df.empty:
     st.subheader("News Items")
     display_cols = ["datetime_local", "scope", "source", "headline", "sentiment", "label", "url"]
     st.dataframe(
-        view_df.sort_values("datetime_utc", ascending=False)[display_cols]
+        news_df.sort_values("datetime_utc", ascending=False)[display_cols]
                .rename(columns={"datetime_local": "datetime"}),
         use_container_width=True,
         hide_index=True,
@@ -316,40 +341,15 @@ if news_df is not None and not news_df.empty:
 
     # Downloads
     st.download_button(
-        label="⬇️ Download CSV (all rows)",
+        label="⬇️ Download CSV",
         data=news_df.to_csv(index=False).encode("utf-8"),
         file_name=f"{subject_code}_mock_news.csv",
         mime="text/csv",
     )
-    st.download_button(
-        label="⬇️ Download CSV (filtered)",
-        data=view_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{subject_code}_mock_news_filtered.csv",
-        mime="text/csv",
-    )
 
-    # Executive summary – dynamic prompt
+    # Executive summary (auto-generated on dataset refresh)
     st.subheader(f"Executive Summary (LLM – mocked) — {subject_display or 'Selection'}")
-    default_prompt = (
-        "You are an equity research assistant. Read the news and produce a concise, executive-style brief "
-        "for a busy trading desk. Summarise key positives, key risks, and any near-term catalysts (1–4 weeks). "
-        "Finish with a 1-sentence bottom line."
-    )
-    with st.expander("Prompt", expanded=True):
-        user_prompt = st.text_area("Edit the prompt", value=default_prompt, height=140)
+    st.markdown(st.session_state.get("summary_text", ""))
 
-    if st.button("🧠 Generate Executive Summary (mock)", use_container_width=True):
-        st.session_state["summary_text"] = mock_llm_summary(view_df if len(view_df) else news_df,
-                                                            subject_display or "Selection",
-                                                            user_prompt)
-
-    if st.session_state.get("summary_text"):
-        st.markdown(st.session_state["summary_text"])
-        st.download_button(
-            label="⬇️ Download summary (Markdown)",
-            data=st.session_state["summary_text"].encode("utf-8"),
-            file_name=f"{subject_code}_summary.md",
-            mime="text/markdown",
-        )
 else:
-    st.info("Choose **Company**, **Topic**, or **Both** in the left sidebar, set a **Date range**, then click **Generate Mock News**.")
+    st.info("Use the sidebar to choose **Company**, **Topic**, or **Both**, pick a **Preset** or **Custom date & time**, then click **Generate / Refresh**.")
