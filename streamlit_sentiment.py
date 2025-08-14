@@ -92,7 +92,7 @@ llm = object()  # placeholder handle
 with st.sidebar:
     st.header("Scope")
 
-    # always outside the form so it reruns instantly
+    # Live-updating toggles (no clearing)
     mode = st.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
 
     if mode == "Company":
@@ -109,6 +109,10 @@ with st.sidebar:
             ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
             index=3, key="date_preset"
         )
+
+        # Inputs driven by the radios above
+        company_name = company_ticker = None
+        topic_name = topic_code = None
 
         if mode == "Company":
             if st.session_state["company_input_mode"] == "Pick from list":
@@ -127,13 +131,13 @@ with st.sidebar:
                 ).strip()
                 company_name = TICKER_BY_NAME.get(typed.upper()) or typed or "Company"
                 company_ticker = NAME_BY_TICKER.get(typed.upper()) or typed.upper() or "COMPANY"
-
         else:
             topic_name = st.text_input("Topic", key="topic_name").strip()
+            topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
 
+        st.markdown("---")
         generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
-
-
+        
 st.title("Sentiment Analysis")
 
 # ─────────────────────────────── Generate ───────────────────────────────
