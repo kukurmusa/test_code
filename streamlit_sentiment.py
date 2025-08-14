@@ -92,66 +92,45 @@ llm = object()  # placeholder handle
 with st.sidebar:
     st.header("Scope")
 
-    # Mode toggle
+    # always outside the form so it reruns instantly
     mode = st.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
 
-    # Reset results if mode changes (#9)
-    if "last_mode" not in st.session_state:
-        st.session_state["last_mode"] = mode
-    if st.session_state["last_mode"] != mode:
-        for k in ("news", "response", "summary_text"):
-            st.session_state.pop(k, None)
-        st.session_state["last_mode"] = mode
-        log_event("mode_changed", {"mode": mode})
+    if mode == "Company":
+        st.session_state.setdefault("company_input_mode", "Pick from list")
+        st.radio(
+            "Company input",
+            ["Pick from list", "Type manually"],
+            key="company_input_mode",
+        )
 
-    # One form holds every input so the app only updates on submit
-    with st.form(key="controls_form", clear_on_submit=False, border=True):
-        # Date preset
+    with st.form("controls_form", clear_on_submit=False):
         preset = st.selectbox(
             "Date preset (UTC)",
             ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
             index=3, key="date_preset"
         )
 
-        company_name = company_ticker = None
-        topic_name = topic_code = None
-
         if mode == "Company":
-            st.radio(
-                "Company input",
-                ["Pick from list", "Type manually"],
-                key="company_input_mode"
-            )
             if st.session_state["company_input_mode"] == "Pick from list":
-                company_choice = st.selectbox(
+                choice = st.selectbox(
                     "Company",
                     options=COMPANIES,
                     format_func=lambda c: f"{c['name']} ({c['ticker']})",
-                    index=0,
                     key="company_select",
                 )
-                company_name = company_choice["name"]
-                company_ticker = company_choice["ticker"]
+                company_name, company_ticker = choice["name"], choice["ticker"]
             else:
                 typed = st.text_area(
                     "Company (name or ticker)",
                     placeholder="e.g., Apple Inc. or AAPL",
-                    key="company_text",
-                    height=80,
+                    key="company_text", height=80
                 ).strip()
-                code = NAME_BY_TICKER.get(typed.upper()) or typed.upper() or "COMPANY"
-                name = TICKER_BY_NAME.get(typed.upper()) or typed or "Company"
-                company_name, company_ticker = name, code
+                company_name = TICKER_BY_NAME.get(typed.upper()) or typed or "Company"
+                company_ticker = NAME_BY_TICKER.get(typed.upper()) or typed.upper() or "COMPANY"
 
-        else:  # Topic mode
-            topic_name = st.text_input(
-                "Topic",
-                placeholder="e.g., AI in data centres",
-                key="topic_name",
-            ).strip()
-            topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
+        else:
+            topic_name = st.text_input("Topic", key="topic_name").strip()
 
-        st.markdown("---")
         generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
 
 
