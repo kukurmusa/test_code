@@ -89,61 +89,71 @@ def generate_response(llm, xml: str, prompt: str) -> Dict[str, str]:
 llm = object()  # placeholder handle
 
 # ─────────────────────────────── Sidebar ───────────────────────────────
-st.sidebar.header("Scope")
+with st.sidebar:
+    st.header("Scope")
 
-mode = st.sidebar.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
+    # Mode toggle
+    mode = st.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
 
-# (#9) Reset results when the mode changes
-if "last_mode" not in st.session_state:
-    st.session_state["last_mode"] = mode
-if st.session_state["last_mode"] != mode:
-    for k in ("news", "response", "summary_text"):
-        st.session_state.pop(k, None)
-    st.session_state["last_mode"] = mode
-    log_event("mode_changed", {"mode": mode})
+    # Reset results if mode changes (#9)
+    if "last_mode" not in st.session_state:
+        st.session_state["last_mode"] = mode
+    if st.session_state["last_mode"] != mode:
+        for k in ("news", "response", "summary_text"):
+            st.session_state.pop(k, None)
+        st.session_state["last_mode"] = mode
+        log_event("mode_changed", {"mode": mode})
 
-# Secondary toggle for company input
-if mode == "Company":
-    st.session_state.setdefault("company_input_mode", "Pick from list")
-    st.sidebar.radio("Company input", ["Pick from list", "Type manually"],
-                     horizontal=False, key="company_input_mode")
+    # One form holds every input so the app only updates on submit
+    with st.form(key="controls_form", clear_on_submit=False, border=True):
+        # Date preset
+        preset = st.selectbox(
+            "Date preset (UTC)",
+            ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
+            index=3, key="date_preset"
+        )
 
-# Date preset
-preset = st.sidebar.selectbox("Date preset (UTC)",
-                              ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
-                              index=3, key="date_preset")
+        company_name = company_ticker = None
+        topic_name = topic_code = None
 
-# ─────────────────────────────── Controls ───────────────────────────────
-with st.form(key="controls_form", clear_on_submit=False):
-    company_name = company_ticker = None
-    topic_name = topic_code = None
-
-    if mode == "Company":
-        if st.session_state["company_input_mode"] == "Pick from list":
-            company_choice = st.selectbox(
-                "Company",
-                options=COMPANIES,
-                format_func=lambda c: f"{c['name']} ({c['ticker']})",
-                index=0,
-                key="company_select",
+        if mode == "Company":
+            st.radio(
+                "Company input",
+                ["Pick from list", "Type manually"],
+                key="company_input_mode"
             )
-            company_name = company_choice["name"]
-            company_ticker = company_choice["ticker"]
-        else:
-            typed = st.text_area("Company (name or ticker)", height=80, key="company_text").strip()
-            code = NAME_BY_TICKER.get(typed.upper()) or typed.upper()
-            name = TICKER_BY_NAME.get(typed.upper()) or typed
-            if not code:
-                code = "COMPANY"
-            company_name, company_ticker = name, code
+            if st.session_state["company_input_mode"] == "Pick from list":
+                company_choice = st.selectbox(
+                    "Company",
+                    options=COMPANIES,
+                    format_func=lambda c: f"{c['name']} ({c['ticker']})",
+                    index=0,
+                    key="company_select",
+                )
+                company_name = company_choice["name"]
+                company_ticker = company_choice["ticker"]
+            else:
+                typed = st.text_area(
+                    "Company (name or ticker)",
+                    placeholder="e.g., Apple Inc. or AAPL",
+                    key="company_text",
+                    height=80,
+                ).strip()
+                code = NAME_BY_TICKER.get(typed.upper()) or typed.upper() or "COMPANY"
+                name = TICKER_BY_NAME.get(typed.upper()) or typed or "Company"
+                company_name, company_ticker = name, code
 
-    if mode == "Topic":
-        topic_name = st.text_input("Topic", placeholder="e.g., AI in data centres",
-                                   key="topic_name").strip()
-        topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
+        else:  # Topic mode
+            topic_name = st.text_input(
+                "Topic",
+                placeholder="e.g., AI in data centres",
+                key="topic_name",
+            ).strip()
+            topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
 
-    st.markdown("---")
-    generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
+        st.markdown("---")
+        generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
+
 
 st.title("Sentiment Analysis")
 
