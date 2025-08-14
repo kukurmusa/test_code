@@ -1,355 +1,269 @@
 # app.py
-# Streamlit Sentiment Analysis POC (mock data)
-# Run:  streamlit run app.py
+# Streamlit Sentiment Analysis — patched with (#4, #5, #6, #9, #13) + usage logging
 
-import streamlit as st
+import json
+import logging
+from pathlib import Path
+from typing import Dict, Any, Optional
+
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta, timezone, date, time as dtime
-import random
 import plotly.express as px
-import hashlib
+import plotly.graph_objects as go
+import streamlit as st
 
-st.set_page_config(page_title="Sentiment Analysis POC", page_icon="📰", layout="wide")
+# ─────────────────────────────── Config ───────────────────────────────
+st.set_page_config(page_title="Sentiment Analysis", page_icon="📰", layout="wide")
 
-# -------------------------------------
-# Mock universe
-# -------------------------------------
+# ---- Logging (file) ----
+def _init_logger() -> logging.Logger:
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "usage.log"
+
+    logger = logging.getLogger("sentiment_app")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    return logger
+
+LOGGER = _init_logger()
+
+def log_event(event: str, payload: Optional[Dict[str, Any]] = None, level: str = "info"):
+    data = {"event": event, **(payload or {})}
+    msg = json.dumps(data, ensure_ascii=False)
+    getattr(LOGGER, level.lower(), LOGGER.info)(msg)
+
+log_event("app_started", {"version": "0.1.0"})
+
+# ─────────────────────── Mock data + helpers (replace) ───────────────────────
 COMPANIES = [
     {"ticker": "AAPL", "name": "Apple Inc."},
     {"ticker": "MSFT", "name": "Microsoft Corporation"},
     {"ticker": "GOOGL", "name": "Alphabet Inc."},
     {"ticker": "AMZN", "name": "Amazon.com, Inc."},
-    {"ticker": "META", "name": "Meta Platforms, Inc."},
-    {"ticker": "TSLA", "name": "Tesla, Inc."},
-    {"ticker": "NVDA", "name": "NVIDIA Corporation"},
-    {"ticker": "BARC", "name": "Barclays PLC"},
-    {"ticker": "HSBA", "name": "HSBC Holdings plc"},
-    {"ticker": "BP",   "name": "BP p.l.c."},
-    {"ticker": "SHEL", "name": "Shell plc"},
-    {"ticker": "AAL",  "name": "Anglo American plc"},
 ]
-TICKER_BY_NAME = {c["name"]: c["ticker"] for c in COMPANIES}
-NAME_BY_TICKER = {c["ticker"]: c["name"] for c in COMPANIES}
-COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
-
-# Fixed mock controls
-N_ITEMS = 60
-MU = 0.05
-SIGMA = 0.35
-SEED = 42
-
-random.seed(SEED)
-np.random.seed(SEED)
-
-# --- Session defaults
-for k, v in {
-    "news_df": None,
-    "subject_display": "",
-    "subject_code": "SUBJ",
-    "summary_text": "",
-    "generated_at": None,
-}.items():
-    st.session_state.setdefault(k, v)
-
-# -------------------------------------
-# Helpers
-# -------------------------------------
-def stable_int_from_string(s: str) -> int:
-    return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16)
+TICKER_BY_NAME = {c["name"].upper(): c["ticker"] for c in COMPANIES}
+NAME_BY_TICKER = {c["ticker"].upper(): c["name"] for c in COMPANIES}
 
 @st.cache_data(show_spinner=False)
-def generate_mock_news(subject: str, code: str, kind: str,
-                       n: int, start_dt_utc: datetime, end_dt_utc: datetime,
-                       mu: float, sigma: float, seed_val: int) -> pd.DataFrame:
-    """Generate mock articles for a company/topic between start/end (UTC)."""
-    subj_seed = seed_val + stable_int_from_string(f"{kind}:{code}") % 10_000_000
-    rng = np.random.default_rng(subj_seed)
+def get_news_data(type_of_search: str, subject: str, date_preset: str) -> Dict[str, Any]:
+    """Return {'docs': pd.DataFrame, 'info': {...}}. Replace with your real fetch."""
+    import random, time
+    rng = random.Random(hash((type_of_search, subject, date_preset)) & 0xFFFFFFFF)
+    rows = rng.randint(15, 40)
+    now = pd.Timestamp.utcnow()
+    df = pd.DataFrame({
+        "timestamp": [now - pd.Timedelta(minutes=5*i) for i in range(rows)],
+        "headline": [f"{subject}: News item {i}" for i in range(rows)],
+        "source_name": [rng.choice(["FT", "Bloomberg", "Reuters"]) for _ in range(rows)],
+        "scope": [type_of_search] * rows,
+        "sentiment": [max(-1, min(1, rng.gauss(0.05 if type_of_search=="COMPANY" else 0, 0.35))) for _ in range(rows)],
+    })
+    time.sleep(0.2)  # simulate latency
+    return {"docs": df, "info": {"subject": subject, "type": type_of_search, "date_preset": date_preset}}
 
-    span_seconds = max(1, int((end_dt_utc - start_dt_utc).total_seconds()))
-    rand_secs = rng.integers(0, span_seconds, size=n)
-    times = [start_dt_utc + timedelta(seconds=int(s)) for s in rand_secs]
-    times = sorted(times, reverse=True)
-
-    sources = ["Bloomberg", "Reuters", "FT", "WSJ", "CNBC", "MarketWatch", "Morningstar", "City A.M.", "The Times"]
-    verbs = ["tops", "misses", "guides", "warns", "launches", "expands", "settles", "wins", "partners", "invests in"]
-    objects = [
-        "Q earnings", "revenue estimates", "outlook", "new product line", "AI initiative", "share buyback",
-        "regulatory probe", "data centre push", "UK expansion", "cost-cut programme"
-    ]
-    body_bits = [
-        "Management commentary points to near-term variability but underscores medium-term growth drivers.",
-        "Analysts remain split on the scope of margin expansion given input cost dynamics.",
-        "Channel checks suggest stabilising demand in core segments with upside from new launches.",
-        "Regulatory overhang persists but base-case timelines appear manageable.",
-        "Valuation screens as fair vs. peers; catalysts include events over the next 1–4 weeks."
-    ]
-
-    sentiments = np.clip(rng.normal(loc=mu, scale=sigma, size=n), -1, 1)
-
+def convert_to_xml(df: pd.DataFrame) -> str:
+    """Replace with your own serialiser for the LLM."""
     rows = []
-    for i in range(n):
-        src = random.choice(sources)
-        verb = random.choice(verbs)
-        obj = random.choice(objects)
-        headline = f"{subject} {verb} {obj}" if kind == "company" else f"{subject}: {verb} {obj}"
-        url = f"https://example.com/{code}/{i}"
-        s = float(sentiments[i])
-        label = "Positive" if s > 0.15 else ("Negative" if s < -0.15 else "Neutral")
-        content = (
-            f"{headline}. {random.choice(body_bits)} Sentiment skew: {label.lower()} (score {s:.2f}). "
-            f"{random.choice(body_bits)}"
-        )
-        rows.append({
-            "datetime_utc": times[i].replace(microsecond=0, tzinfo=timezone.utc),
-            "source": src,
-            "subject": subject,
-            "headline": headline,
-            "url": url,
-            "sentiment": s,
-            "label": label,
-            "content": content,
-            "kind": kind,                                # "company" or "topic"
-            "scope": f"{'Company' if kind=='company' else 'Topic'}: {subject}",
-            "code": code,
-        })
+    for _, r in df.iterrows():
+        rows.append(f"<doc ts='{r['timestamp']}' source='{r.get('source_name','')}' "
+                    f"sentiment='{r.get('sentiment', 0)}'><h>{r.get('headline','')}</h></doc>")
+    return "<docs>" + "".join(rows) + "</docs>"
 
-    df = pd.DataFrame(rows)
-    df["datetime_local"] = pd.to_datetime(df["datetime_utc"]).dt.tz_convert(None)  # naive local for display
-    return df.sort_values("datetime_utc", ascending=False)
+def generate_response(llm, xml: str, prompt: str) -> Dict[str, str]:
+    """Call your LLM here. This stub returns deterministic JSON."""
+    # parse crude mean for the stub
+    import re, statistics
+    sents = [float(x) for x in re.findall(r"sentiment='(-?\d+\.?\d*)'", xml)]
+    sc = statistics.fmean(sents) if sents else 0.0
+    content = json.dumps({
+        "summary": f"Coverage focuses on {len(sents)} items. Average sentiment ≈ {sc:.2f}.",
+        "sentiment_score": round(sc, 2)
+    })
+    return {"content": content}
 
-def mock_llm_summary(df: pd.DataFrame, subject_display: str, prompt: str) -> str:
-    avg = df["sentiment"].mean()
-    pos = (df["label"] == "Positive").sum()
-    neg = (df["label"] == "Negative").sum()
-    neu = (df["label"] == "Neutral").sum()
-    latest = df.sort_values("datetime_utc", ascending=False).head(5)
-    top_pos = df.sort_values("sentiment", ascending=False).head(2)["headline"].tolist()
-    top_neg = df.sort_values("sentiment", ascending=True).head(2)["headline"].tolist()
-    tilt = "constructive" if avg > 0.05 else ("cautious" if avg < -0.05 else "balanced")
+llm = object()  # placeholder handle
 
-    lines = []
-    lines.append(f"Prompt noted ({len(prompt)} chars). Below is a mock summary based on the dataset only.")
-    lines.append("")
-    lines.append(f"**Subject**: {subject_display}")
-    lines.append(f"**Tone**: {tilt.capitalize()} | **Avg sentiment**: {avg:.2f} | **Split**: {pos}↑ / {neu}→ / {neg}↓")
-    lines.append("")
-    lines.append("**Key Positives**")
-    for h in top_pos:
-        lines.append(f"• {h}")
-    lines.append("")
-    lines.append("**Key Risks**")
-    for h in top_neg:
-        lines.append(f"• {h}")
-    lines.append("")
-    lines.append("**Recent Coverage (last 5 items)**")
-    for _, r in latest.iterrows():
-        ts = pd.to_datetime(r["datetime_utc"]).strftime("%d %b %H:%M UTC")
-        lines.append(f"• [{ts}] {r['source']}: {r['headline']}")
-    lines.append("")
-    lines.append(f"**Bottom line**: Overall read is {tilt}; watch for near-term catalysts and guidance updates.")
-    return "\n".join(lines)
+# ─────────────────────────────── Sidebar ───────────────────────────────
+st.sidebar.header("Scope")
 
-# -------------------------------------
-# Sidebar — Controls Form (prevents rerun until submit)
-# -------------------------------------
-# Sidebar — Controls (toggle outside form; inputs inside form)
-# -------------------------------------
-# -------------------------------------
-# Sidebar — Controls (no "Both", presets only)
-# -------------------------------------
-with st.sidebar:
-    st.header("🔎 Scope & Range")
+mode = st.sidebar.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
 
-    # Outside the form so the UI switches immediately when toggled
-    mode = st.radio("Analyse by", ["Company", "Topic"], horizontal=True, key="mode")
+# (#9) Reset results when the mode changes
+if "last_mode" not in st.session_state:
+    st.session_state["last_mode"] = mode
+if st.session_state["last_mode"] != mode:
+    for k in ("news", "response", "summary_text"):
+        st.session_state.pop(k, None)
+    st.session_state["last_mode"] = mode
+    log_event("mode_changed", {"mode": mode})
+
+# Secondary toggle for company input
+if mode == "Company":
+    st.session_state.setdefault("company_input_mode", "Pick from list")
+    st.sidebar.radio("Company input", ["Pick from list", "Type manually"],
+                     horizontal=False, key="company_input_mode")
+
+# Date preset
+preset = st.sidebar.selectbox("Date preset (UTC)",
+                              ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
+                              index=3, key="date_preset")
+
+# ─────────────────────────────── Controls ───────────────────────────────
+with st.form(key="controls_form", clear_on_submit=False):
+    company_name = company_ticker = None
+    topic_name = topic_code = None
 
     if mode == "Company":
-        # Toggle outside the form so it reruns and swaps the widget
-        st.session_state.setdefault("company_input_mode", "Pick from list")
-        company_input_mode = st.radio(
-            "Company input",
-            ["Pick from list", "Type manually"],
-            horizontal=False,
-            key="company_input_mode",
-        )
-
-    # Rest in a form so it doesn’t rerun until submit
-    with st.form(key="controls_form", clear_on_submit=False):
-        company_name = company_ticker = None
-        topic_name = topic_code = None
-
-        # --- Company inputs (only for Company)
-        if mode == "Company":
-            if st.session_state["company_input_mode"] == "Pick from list":
-                COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
-                company_choice = st.selectbox("Company", COMPANY_OPTIONS, index=0, key="company_select")
-                name = company_choice.split(" (")[0]
-                code = company_choice.split("(")[-1].rstrip(")")
-            else:
-                typed = st.text_area(
-                    "Company (name or ticker)",
-                    placeholder="e.g., Apple Inc. or AAPL",
-                    key="company_text",
-                    height=80,
-                ).strip()
-                # Resolve to name/ticker if known; otherwise use literal
-                code = typed.upper() if typed.upper() in NAME_BY_TICKER else None
-                name = NAME_BY_TICKER.get(typed.upper()) or TICKER_BY_NAME.get(typed) or typed
-                if code is None:
-                    code = (typed.upper()[:8] or "COMPANY")
+        if st.session_state["company_input_mode"] == "Pick from list":
+            company_choice = st.selectbox(
+                "Company",
+                options=COMPANIES,
+                format_func=lambda c: f"{c['name']} ({c['ticker']})",
+                index=0,
+                key="company_select",
+            )
+            company_name = company_choice["name"]
+            company_ticker = company_choice["ticker"]
+        else:
+            typed = st.text_area("Company (name or ticker)", height=80, key="company_text").strip()
+            code = NAME_BY_TICKER.get(typed.upper()) or typed.upper()
+            name = TICKER_BY_NAME.get(typed.upper()) or typed
+            if not code:
+                code = "COMPANY"
             company_name, company_ticker = name, code
 
-        # --- Topic inputs (only for Topic)
-        if mode == "Topic":
-            topic_name = st.text_input("Topic", placeholder="e.g., AI in data centres", key="topic_name").strip()
-            topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
+    if mode == "Topic":
+        topic_name = st.text_input("Topic", placeholder="e.g., AI in data centres",
+                                   key="topic_name").strip()
+        topic_code = (topic_name or "TOPIC").upper().replace(" ", "_")
 
-        st.markdown("---")
+    st.markdown("---")
+    generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
 
-        # Date presets only
-        from datetime import datetime as dt, timedelta, timezone, time as dtime
-        today_utc = dt.now(timezone.utc).date()
-        preset = st.selectbox(
-            "Date preset (UTC)",
-            ["Today", "Yesterday", "Last 24 hours", "Last 7 days", "Last 30 days"],
-            index=3,
-            key="date_preset",
-        )
-        if preset == "Today":
-            start_dt_utc = dt.combine(today_utc, dtime.min, tzinfo=timezone.utc)
-            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
-        elif preset == "Yesterday":
-            y = today_utc - timedelta(days=1)
-            start_dt_utc = dt.combine(y, dtime.min, tzinfo=timezone.utc)
-            end_dt_utc   = dt.combine(y, dtime.max, tzinfo=timezone.utc)
-        elif preset == "Last 24 hours":
-            end_dt_utc   = dt.now(timezone.utc)
-            start_dt_utc = end_dt_utc - timedelta(hours=24)
-        elif preset == "Last 7 days":
-            start_dt_utc = dt.combine(today_utc - timedelta(days=6), dtime.min, tzinfo=timezone.utc)
-            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
-        else:  # Last 30 days
-            start_dt_utc = dt.combine(today_utc - timedelta(days=29), dtime.min, tzinfo=timezone.utc)
-            end_dt_utc   = dt.combine(today_utc, dtime.max, tzinfo=timezone.utc)
+st.title("Sentiment Analysis")
 
-        submitted = st.form_submit_button("🔎 Generate / Refresh", use_container_width=True)
+# ─────────────────────────────── Generate ───────────────────────────────
+if generate:
+    with st.spinner(text="Fetching news...", show_time=True):
+        log_event("generate_clicked", {
+            "mode": mode,
+            "company_input_mode": st.session_state.get("company_input_mode"),
+            "company": company_name if mode == "Company" else None,
+            "company_code": company_ticker if mode == "Company" else None,
+            "topic": topic_name if mode == "Topic" else None,
+            "date_preset": preset,
+        })
 
-st.title("📰 Sentiment Analysis – Mock POC")
+        # (#5) Topic must not be empty
+        if mode == "Topic" and not (topic_name or "").strip():
+            st.warning("Please enter a topic to generate news.")
+            log_event("topic_missing", {})
+            st.stop()
 
-# -------------------------------------
-# Generate on submit (no rerun on mere widget changes)
-# -------------------------------------
-if submitted or st.session_state.get("news_df") is None:
-    frames = []
-    subject_parts = []
-    subj_codes = []
+        frames = []
+        if mode == "Company" and company_name:
+            news = get_news_data(type_of_search="COMPANY",
+                                 subject=company_name,
+                                 date_preset=preset)
+            frames.append(news["docs"])
+        elif mode == "Topic":
+            news = get_news_data(type_of_search="TOPIC",
+                                 subject=topic_name,
+                                 date_preset=preset)
+            frames.append(news["docs"])
 
-    if mode in ("Company", "Both") and company_name:
-        frames.append(
-            generate_mock_news(
-                subject=company_name, code=company_ticker, kind="company",
-                n=N_ITEMS, start_dt_utc=start_dt_utc, end_dt_utc=end_dt_utc,
-                mu=MU, sigma=SIGMA, seed_val=SEED
-            )
-        )
-        subject_parts.append(f"{company_name} ({company_ticker})")
-    if mode in ("Topic", "Both") and (topic_name or "").strip():
-        frames.append(
-            generate_mock_news(
-                subject=topic_name, code=topic_code, kind="topic",
-                n=N_ITEMS, start_dt_utc=start_dt_utc, end_dt_utc=end_dt_utc,
-                mu=MU, sigma=SIGMA, seed_val=SEED
-            )
-        )
-        subject_parts.append(f"Topic: {topic_name}")
-    if mode in ("Topic", "Both") and not (topic_name or "").strip():
-        st.warning("Please enter a topic.")
+        df_all = pd.concat(frames, ignore_index=True).sort_values(by="timestamp", ascending=False) if frames else pd.DataFrame()
+        st.session_state["news"] = {
+            "docs": df_all,
+            "info": {
+                "mode": mode,
+                "subject": company_name if mode == "Company" else topic_name,
+                "subject_code": company_ticker if mode == "Company" else topic_code,
+                "date_preset": preset,
+            },
+        }
+        log_event("news_fetched", {"rows": int(len(df_all))})
 
-    if frames:
-        news_df_all = pd.concat(frames, ignore_index=True).sort_values("datetime_utc", ascending=False)
-        st.session_state["news_df"] = news_df_all
-        st.session_state["subject_display"] = " + ".join(subject_parts) or "Selection"
-        st.session_state["subject_code"] = "-".join([c for c in [company_ticker if mode in ("Company","Both") else None,
-                                                                 topic_code if mode in ("Topic","Both") else None] if c]) or "SUBJ"
-        st.session_state["generated_at"] = datetime.now(timezone.utc)
+# ─────────────────────────────── Main view ───────────────────────────────
+news = st.session_state.get("news")
+view_df = (news or {}).get("docs")
+view_df = view_df if isinstance(view_df, pd.DataFrame) else pd.DataFrame()
+subject_display = (news or {}).get("info", {}).get("subject", "")
 
-        # Auto-generate executive summary (no button)
-        default_prompt = (
-            "You are an equity research assistant. Read the news and produce a concise, executive-style brief "
-            "for a busy trading desk. Summarise key positives, key risks, and any near-term catalysts (1–4 weeks). "
-            "Finish with a 1-sentence bottom line."
-        )
-        st.session_state["summary_text"] = mock_llm_summary(st.session_state["news_df"], st.session_state["subject_display"], default_prompt)
+if not view_df.empty:
+    # KPIs (filled after compute)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Items", len(view_df))
+    col2.metric("Avg sentiment", f"{view_df['sentiment'].mean():.2f}")
+    col3.metric("Sentiment Std Dev", f"{view_df['sentiment'].std():.2f}")
 
-news_df = st.session_state.get("news_df")
-subject_display = st.session_state.get("subject_display")
-subject_code = st.session_state.get("subject_code", "SUBJ")
+    # (#6) Sentiment overview line with mean marker
+    fig = go.Figure()
+    fig.add_hline(y=0)
+    mu = float(view_df["sentiment"].mean())
+    fig.add_hline(y=mu, line_dash="dot")
+    fig.add_trace(go.Scatter(x=[0], y=[mu], mode="markers", name="Average sentiment", marker=dict(size=10)))
+    fig.update_layout(
+        title="Sentiment Score",
+        xaxis=dict(visible=False),
+        yaxis=dict(range=[-1.1, 1.1], tickvals=[-1, -0.5, 0, 0.5, 1]),
+        showlegend=False, height=180,
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-# -------------------------------------
-# Main view
-# -------------------------------------
-if news_df is not None and not news_df.empty:
-    # Header KPIs (no filters; full dataset)
-    as_of_ts = pd.to_datetime(news_df["datetime_utc"]).max()
-    gen_at = st.session_state.get("generated_at")
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Items", len(news_df))
-    k2.metric("Sentiment as of", as_of_ts.strftime("%d %b %Y %H:%M UTC"))
-    k3.metric("Generated at", gen_at.strftime("%d %b %Y %H:%M UTC") if gen_at else "—")
+    # Distribution + Box
+    scopes = view_df["scope"].unique().tolist() if "scope" in view_df.columns else []
+    color_col = "scope" if len(scopes) > 1 else None
 
-    # Charts (no filters, colour by scope if Both)
-    scopes = sorted(news_df["scope"].unique())
-    color_arg = "scope" if len(scopes) > 1 else None
+    c1, c2 = st.columns(2)
+    c1.subheader("Sentiment Score Distribution")
+    fig_hist = px.histogram(view_df, x="sentiment", nbins=30, marginal="rug", color=color_col)
+    c1.plotly_chart(fig_hist, use_container_width=True)
 
-    st.subheader("Sentiment Score Distribution")
-    fig_hist = px.histogram(news_df, x="sentiment", nbins=30, marginal="rug", color=color_arg)
-    fig_hist.update_layout(height=300, bargap=0.05)
-    st.plotly_chart(fig_hist, use_container_width=True)
+    c2.subheader("Sentiment Box Plot")
+    fig_box = px.box(view_df, y="sentiment", points="all", color=color_col)
+    c2.plotly_chart(fig_box, use_container_width=True)
 
-    st.subheader("Sentiment Box Plot")
-    fig_box = px.box(news_df, y="sentiment", points="all", color=color_arg)
-    fig_box.update_layout(height=300)
-    st.plotly_chart(fig_box, use_container_width=True)
-
-    st.subheader("Sentiment over Time")
-    tmp = news_df.sort_values("datetime_utc").copy()
-    tmp["ts"] = pd.to_datetime(tmp["datetime_utc"])
-    fig_time = px.scatter(tmp, x="ts", y="sentiment", hover_data=["scope", "source", "headline"],
-                          trendline="lowess", color=color_arg)
-    fig_time.update_layout(height=320)
-    st.plotly_chart(fig_time, use_container_width=True)
-
-    st.subheader("Source Breakdown")
-    src_counts = news_df.groupby(["source", "label", "scope"], as_index=False).size() if len(scopes) > 1 \
-        else news_df.groupby(["source", "label"], as_index=False).size()
-    fig_src = px.bar(src_counts, x="source", y="size",
-                     color="label", barmode="stack",
-                     facet_col="scope" if len(scopes) > 1 else None)
-    fig_src.update_layout(height=360, xaxis_title=None, yaxis_title="Items")
-    st.plotly_chart(fig_src, use_container_width=True)
-
-    # Table
     st.subheader("News Items")
-    display_cols = ["datetime_local", "scope", "source", "headline", "sentiment", "label", "url"]
-    st.dataframe(
-        news_df.sort_values("datetime_utc", ascending=False)[display_cols]
-               .rename(columns={"datetime_local": "datetime"}),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(view_df, use_container_width=True, hide_index=True)
 
-    # Downloads
-    st.download_button(
-        label="⬇️ Download CSV",
-        data=news_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{subject_code}_mock_news.csv",
-        mime="text/csv",
-    )
+    # Download
+    if st.download_button("Download CSV", data=view_df.to_csv(index=False), file_name="news.csv"):
+        log_event("csv_downloaded", {"rows": int(len(view_df))})
 
-    # Executive summary (auto-generated on dataset refresh)
-    st.subheader(f"Executive Summary (LLM – mocked) — {subject_display or 'Selection'}")
-    st.markdown(st.session_state.get("summary_text", ""))
+# ─────────────────────────────── LLM summary (#4 + #13) ───────────────────────────────
+st.subheader(f"Executive Summary (LLM) — {subject_display or 'Selection'}")
 
+docs_df = view_df  # already resolved above
+if docs_df.empty:
+    st.info("No news to summarise yet. Choose **Company** or **Topic**, then click **Get Sentiment Analysis**.")
 else:
-    st.info("Use the sidebar to choose **Company**, **Topic**, or **Both**, pick a **Preset** or **Custom date & time**, then click **Generate / Refresh**.")
+    default_prompt = """
+You are an assistant creating an executive-style sentiment summary from article chunks.
+Return ONLY a JSON object with keys:
+{"summary": "...", "sentiment_score": <number between -1 and 1>}
+Do not include any other text.
+"""
+    with st.spinner(text="Summarising...", show_time=True):
+        try:
+            xml_str = convert_to_xml(docs_df)
+            resp = generate_response(llm, xml_str, default_prompt)   # must return {"content": "..."}
+            obj = json.loads(resp["content"])
+            summary = obj.get("summary", "")
+            score = float(obj.get("sentiment_score", 0.0))
+
+            st.session_state["response"] = resp
+            st.session_state["summary_text"] = summary
+
+            st.metric("LLM Sentiment", f"{score:.2f}")
+            st.markdown(summary)
+
+            log_event("llm_summary_ok", {"sentiment_score": score, "chars": len(summary)})
+        except Exception as e:
+            st.error(f"Could not generate summary: {e}")
+            log_event("llm_summary_error", {"error": str(e)}, level="error")
