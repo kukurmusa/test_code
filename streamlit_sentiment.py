@@ -256,3 +256,64 @@ Do not include any other text.
         except Exception as e:
             st.error(f"Could not generate summary: {e}")
             log_event("llm_summary_error", {"error": str(e)}, level="error")
+
+
+
+
+
+
+
+# # ── Sentiment over time (colour coded) ──
+# if not view_df.empty:
+#     # ensure proper types & order
+#     view_df = view_df.copy()
+#     view_df["timestamp"] = pd.to_datetime(view_df["timestamp"], utc=True, errors="coerce")
+#     view_df = view_df.dropna(subset=["timestamp", "sentiment"]).sort_values("timestamp")
+
+#     # rolling mean (tune window as you like)
+#     view_df["sent_roll"] = view_df["sentiment"].rolling(window=20, min_periods=3).mean()
+
+#     fig_ts = go.Figure()
+
+#     if st.session_state.get("colour_mode") == "Continuous":
+#         # scatter with continuous diverging colour
+#         fig_ts.add_trace(go.Scattergl(
+#             x=view_df["timestamp"], y=view_df["sentiment"],
+#             mode="markers", name="Items",
+#             marker=dict(size=6, color=view_df["sentiment"], colorbar=dict(title="Sentiment"),
+#                         colorscale="RdBu", reversescale=True, opacity=0.75),
+#             hovertemplate="%{x|%Y-%m-%d %H:%M UTC}<br>Sent: %{y:.2f}<br>%{text}<extra></extra>",
+#             text=view_df.get("headline", "")
+#         ))
+#     else:
+#         # categorical colours by sign
+#         def label(x: float) -> str:
+#             return "Positive" if x > 0.10 else "Negative" if x < -0.10 else "Neutral"
+#         view_df["sent_label"] = view_df["sentiment"].apply(label)
+
+#         colour_map = {"Positive": "#2ca02c", "Neutral": "#7f7f7f", "Negative": "#d62728"}
+#         for lab, g in view_df.groupby("sent_label", sort=False):
+#             fig_ts.add_trace(go.Scattergl(
+#                 x=g["timestamp"], y=g["sentiment"], mode="markers",
+#                 name=lab, marker=dict(size=6, color=colour_map.get(lab, "#7f7f7f"), opacity=0.75),
+#                 hovertemplate="%{x|%Y-%m-%d %H:%M UTC}<br>Sent: %{y:.2f}<br>%{text}<extra></extra>",
+#                 text=g.get("headline", "")
+#             ))
+
+#     # rolling mean line
+#     fig_ts.add_trace(go.Scatter(
+#         x=view_df["timestamp"], y=view_df["sent_roll"],
+#         mode="lines", name="Rolling mean (20)", line=dict(width=2)
+#     ))
+
+#     # zero line
+#     fig_ts.add_hline(y=0, line_color="gray", opacity=0.6)
+
+#     fig_ts.update_layout(
+#         title="Sentiment Over Time",
+#         xaxis=dict(title="Time", showspikes=True, spikemode="across"),
+#         yaxis=dict(title="Sentiment", range=[-1.1, 1.1], tickvals=[-1, -0.5, 0, 0.5, 1]),
+#         height=380, legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0)
+#     )
+
+#     st.plotly_chart(fig_ts, use_container_width=True)
