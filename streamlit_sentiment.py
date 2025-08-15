@@ -339,8 +339,8 @@ obj = json.loads(raw)
 
 import re
 def extract_sentiment_score(text):
-    # Use regex to find the number after "Sentiment Score"
-    match = re.search(r'\*\*Sentiment Score\*\* : \*\*([0-9.]+)\*\*', text)
+    # Look for the sentiment score pattern anywhere in the text
+    match = re.search(r'\*\*Sentiment Score\*\*\s*:\s*\*\*([0-9.-]+)\*\*', text, re.IGNORECASE)
     if match:
         return float(match.group(1))
     return None
