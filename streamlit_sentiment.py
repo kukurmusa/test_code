@@ -344,3 +344,33 @@ def extract_sentiment_score(text):
     if match:
         return float(match.group(1))
     return None
+
+
+
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
+def colour_for_score(score: float) -> str:
+    """
+    Map score in [-1, 1] → colour hex using RdYlGn colormap
+    (red for negative, yellow for neutral, green for positive).
+    """
+    norm = mcolors.Normalize(vmin=-1, vmax=1)
+    cmap = cm.get_cmap("RdYlGn")   # diverging colormap
+    rgba = cmap(norm(score))
+    return mcolors.rgb2hex(rgba)
+
+# Example in your Streamlit app
+score = extract_sentiment_score(summary_text)
+
+if score is not None:
+    colour = colour_for_score(score)
+    st.markdown(
+        f"""
+        <div style="font-size:2em; font-weight:700;">
+            Sentiment Score:
+            <span style="color:{colour};">{score:.2f}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
