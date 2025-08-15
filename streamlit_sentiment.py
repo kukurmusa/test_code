@@ -321,3 +321,16 @@ Do not include any other text.
 #     )
 
 #     st.plotly_chart(fig_ts, use_container_width=True)
+
+
+
+import re, json
+
+raw = resp["content"].strip()
+
+# Remove leading/trailing code fences if present
+if raw.startswith("```"):
+    raw = re.sub(r"^```(?:json)?", "", raw.strip(), flags=re.IGNORECASE).strip()
+    raw = re.sub(r"```$", "", raw.strip()).strip()
+
+obj = json.loads(raw)
