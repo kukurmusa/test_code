@@ -338,21 +338,9 @@ obj = json.loads(raw)
 
 
 import re
-def extract_sentiment_score_md(text: str) -> float | None:
-    """
-    Extract sentiment score from markdown like:
-    '**Sentiment Score** : **0.5**'
-    Returns float or None.
-    """
-    # looks for optional bold markdown around the value
-    match = re.search(
-        r"Sentiment\s*Score\s*[:\-]?\s*\**\s*([-+]?\d*\.?\d+)\s*\**",
-        text,
-        re.IGNORECASE,
-    )
+def extract_sentiment_score(text):
+    # Use regex to find the number after "Sentiment Score"
+    match = re.search(r'\*\*Sentiment Score\*\* : \*\*([0-9.]+)\*\*', text)
     if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return None
+        return float(match.group(1))
     return None
