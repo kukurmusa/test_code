@@ -334,3 +334,21 @@ if raw.startswith("```"):
     raw = re.sub(r"```$", "", raw.strip()).strip()
 
 obj = json.loads(raw)
+
+
+
+import re
+
+def extract_sentiment_score(text: str) -> float | None:
+    """
+    Extract the sentiment score from a string like:
+    "Executive Summary: blah... Sentiment Score: -0.23"
+    Returns float or None if not found.
+    """
+    match = re.search(r"Sentiment\s*Score\s*:\s*([-+]?\d*\.?\d+)", text, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
