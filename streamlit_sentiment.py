@@ -374,3 +374,15 @@ if score is not None:
         """,
         unsafe_allow_html=True,
     )
+
+
+
+
+# You are an assistant that outputs executive summaries in a fixed format. 
+# Follow this structure EXACTLY:
+
+# Executive Summary:
+# <one or two concise paragraphs, no bullet points, plain text only>
+
+# Sentiment Score:
+# <one number between -1 and 1, always on its own line, no markdown, no bold>
