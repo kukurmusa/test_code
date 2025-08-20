@@ -1,0 +1,54 @@
+Meeting Notes – Prediction Model Discussion
+Prediction Model
+
+Objective
+
+The model aims to potentially replace the “ADV” stat currently integrated into signals and algo execution.
+
+Data Availability
+
+Predictions can be generated as soon as previous day’s data is available in KDB.
+
+Follow-up: Aash to confirm timings with DNA team.
+
+Model Quality
+
+Aash & Aaron believe the current model predictions are strong enough to be shared with clients, based on prediction vs. 9am STVP prediction error.
+
+New Inputs / Enhancements
+
+Andrew explored using futures returns as an additional input.
+
+Other suggested inputs: APAC volume/volatility, day-of-week effects, sentiment from overnight news.
+
+Comment: Hasham noted these are rare and unlikely to significantly influence the model.
+
+Handling Special Days
+
+Month-end/half-days/option expiries: already handled.
+
+Rebalances: require extra work to load raw index predictions from MATA GW.
+
+Earnings: currently no available sources.
+
+Follow-up: Aash to review with DNA team on possible sources.
+
+Productionising the Data
+
+Daily Data Generation
+
+Open question: Should data be produced daily as a CSV file, then loaded into the stats table for access via signals?
+
+Follow-up: Review approach with Anjani, Sanjay, and AR team (once back from holiday).
+
+Client Data Delivery Options
+
+Option A: MATA API (requires additional dev work).
+
+Option B: CSV file via SFTP copy job (simpler, requires some firewall changes).
+
+Things to Share / Next Steps
+
+Andrew to share predictions for STOXX600 for 2025.
+
+Andrew to draft a client-friendly note explaining why the new volume prediction model is better than traditional ADV calculations.
