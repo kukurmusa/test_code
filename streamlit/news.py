@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from functools import lru_cache
 
 import pandas as pd
 import plotly.express as px
@@ -36,6 +37,10 @@ COMPANIES: List[Dict[str, str]] = [
     {"ticker": "AMZN", "name": "Amazon.com, Inc."},
 ]
 
+# Polling and cache constants
+POLL_INTERVAL_SECONDS = 60
+CACHE_TTL_SECONDS = 60
+
 # Your presets – keys are what the user sees, values are your backend enums/strings.
 date_preset_dict: Dict[str, str] = {
     "today": "TODAY",
@@ -54,7 +59,11 @@ date_preset_dict: Dict[str, str] = {
 }
 
 # Normalised maps for robust user input handling
+@lru_cache(maxsize=128)
 def _norm(s: str) -> str:
+    """Cached string normalization for efficiency."""
+    if not isinstance(s, str):
+        return ""
     return s.strip().casefold()
 
 TICKER_BY_NAME = {_norm(c["name"]): c["ticker"] for c in COMPANIES}
@@ -64,20 +73,31 @@ COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
 # --- Caching: client + data --------------------------------------------------
 @st.cache_resource
 def get_llm_client():
-    # If you also need base_url, add it in your services.get_oauth_token() or here.
-    # This function should construct and return your LLM client instance.
-    # Keep it cached so we don't recreate it every rerun.
-    _ = get_oauth_token()  # Ensure token available/valid; your client may need it implicitly.
-    # Example if you use openai:
-    # from openai import OpenAI
-    # return OpenAI(api_key=_)
-    return object()  # placeholder; your services.generate_response uses what it needs
+    """Get cached LLM client instance."""
+    try:
+        token = get_oauth_token()  # Ensure token available/valid
+        # Return a proper client object instead of generic object()
+        # This is still a placeholder but better structured
+        class MockLLMClient:
+            def __init__(self, token: str):
+                self.token = token
+        return MockLLMClient(token)
+    except Exception as e:
+        st.error(f"Failed to initialize LLM client: {e}")
+        return None
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def get_news_cached(search_type: str, query: str, preset_key: str) -> Dict[str, Any]:
     """Cache API calls for 60s to avoid hammering the backend while polling."""
-    backend_preset = date_preset_dict[preset_key]
-    return get_news_data(type_of_search=search_type, search_string=query, date_preset=backend_preset)
+    if not query or not query.strip():
+        return {"res": pd.DataFrame(), "info": {}}
+    
+    backend_preset = date_preset_dict.get(preset_key, "THIS_WEEK")
+    try:
+        return get_news_data(type_of_search=search_type, search_string=query.strip(), date_preset=backend_preset)
+    except Exception as e:
+        st.error(f"Failed to fetch news data: {e}")
+        return {"res": pd.DataFrame(), "info": {}}
 
 # --- Utilities ---------------------------------------------------------------
 def init_logger() -> None:
@@ -98,27 +118,50 @@ def log_event(event: str, payload: Optional[Dict[str, Any]] = None, level: str =
 
 def colour_for_score(score: float) -> str:
     """Return a hex colour from a diverging colormap based on score in [-1, 1]."""
+    # Clamp score to valid range
+    score = max(-1.0, min(1.0, score))
     norm = mcolors.Normalize(vmin=-1, vmax=1)
     cmap = mcolors.get_cmap("RdYlGn")
     rgba = cmap(norm(score))
     return mcolors.to_hex(rgba)
 
-def split_company_label(label: str) -> tuple[str, str]:
+def split_company_label(label: str) -> Tuple[str, str]:
     """'Apple Inc. (AAPL)' -> ('Apple Inc.', 'AAPL')"""
+    if not isinstance(label, str):
+        return "", ""
+    
     if "(" in label and label.endswith(")"):
         name = label[: label.rfind("(")].strip()
         ticker = label[label.rfind("(") + 1 : -1].strip()
         return name, ticker
     return label, ""
 
-def resolve_company(user_typed: str) -> tuple[Optional[str], Optional[str]]:
+def resolve_company(user_typed: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (name, ticker) trying both directions, robust to case/space."""
-    n = _norm(user_typed)
-    ticker = TICKER_BY_NAME.get(n) or user_typed.strip().upper() if _norm(user_typed) in NAME_BY_TICKER else None
-    if not ticker:
-        ticker = NAME_BY_TICKER.get(n) and user_typed.strip().upper()
-    name = NAME_BY_TICKER.get(_norm(ticker or "")) or TICKER_BY_NAME.get(n) and user_typed.strip()
-    return (name, ticker)
+    if not isinstance(user_typed, str) or not user_typed.strip():
+        return None, None
+    
+    normalized_input = _norm(user_typed)
+    
+    # Try to find ticker by company name
+    if normalized_input in TICKER_BY_NAME:
+        ticker = TICKER_BY_NAME[normalized_input]
+        name = user_typed.strip()  # Use original case for display
+        return name, ticker
+    
+    # Try to find name by ticker
+    if normalized_input in NAME_BY_TICKER:
+        name = NAME_BY_TICKER[normalized_input]
+        ticker = user_typed.strip().upper()  # Normalize ticker to uppercase
+        return name, ticker
+    
+    # If not found in our predefined lists, treat as manual input
+    # Assume it's a ticker if it's short and uppercase-ish, otherwise assume it's a company name
+    cleaned_input = user_typed.strip()
+    if len(cleaned_input) <= 5 and cleaned_input.isupper():
+        return None, cleaned_input  # Treat as ticker
+    else:
+        return cleaned_input, None  # Treat as company name
 
 # --- Session state (single source of truth) ----------------------------------
 def init_state() -> None:
@@ -150,22 +193,28 @@ def fetch_and_update_news() -> None:
 
     if mode == "Company":
         subject = st.session_state.get("company_name")
-        if not subject:
+        if not subject or not subject.strip():
+            st.warning("Please select or enter a company name.")
             return
         res = get_news_cached("COMPANY", subject, preset)
-        subtitle = f"Company Details – {res.get('info', {}).get('name','')}"
+        subtitle = f"Company Details – {res.get('info', {}).get('name', subject)}"
     else:
         subject = st.session_state.get("topic_name")
-        if not subject:
+        if not subject or not subject.strip():
+            st.warning("Please enter a topic.")
             return
         res = get_news_cached("TOPIC", subject, preset)
-        subtitle = f"Topic – {res.get('info', {}).get('name','')}"
+        subtitle = f"Topic – {res.get('info', {}).get('name', subject)}"
 
     df = res.get("res") if isinstance(res, dict) else None
     df = df if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
+    # Ensure sentiment column is properly processed
+    if not df.empty and "sentiment" in df.columns:
+        df["sentiment"] = pd.to_numeric(df["sentiment"], errors="coerce")
+
     st.session_state["news"] = {
-        "docs": df.sort_values("timestamp", ascending=False).reset_index(drop=True),
+        "docs": df.sort_values("timestamp", ascending=False).reset_index(drop=True) if not df.empty and "timestamp" in df.columns else df,
         "info": {
             "mode": mode,
             "subject": subject or "",
@@ -183,15 +232,16 @@ def maybe_poll() -> None:
     due = st.session_state.next_poll_at is None or now >= st.session_state.next_poll_at
     if due:
         fetch_and_update_news()
-        st.session_state.next_poll_at = now + timedelta(seconds=60)
+        st.session_state.next_poll_at = now + timedelta(seconds=POLL_INTERVAL_SECONDS)
         st.toast("Polled for updates")
 
 # --- UI helpers --------------------------------------------------------------
 def top_status_row() -> None:
-    c1, c2, c3 = st.columns([1, 1, 2])
+    c1, c2 = st.columns([1, 1])  # Fixed: removed unused third column
     last = st.session_state.last_update
     c1.caption(f"Last refresh: {last:%H:%M:%S} UTC" if last else "Last refresh: —")
     c2.caption("Polling: ✅" if st.session_state.polling else "Polling: ⛔")
+    
     if st.button("🔁 Start / Stop Updates", use_container_width=False):
         st.session_state.polling = not st.session_state.polling
         if st.session_state.polling:
@@ -202,6 +252,11 @@ def top_status_row() -> None:
         st.rerun()
 
 def sentiment_scale(avg: float) -> go.Figure:
+    # Validate input
+    if not isinstance(avg, (int, float)) or pd.isna(avg):
+        avg = 0.0
+    avg = max(-1.0, min(1.0, avg))  # Clamp to valid range
+    
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[-1, 1], y=[0, 0], mode="lines",
                              line=dict(color="gray", width=2), name="Sentiment Scale"))
@@ -233,53 +288,64 @@ def main() -> None:
     top_status_row()
     st.divider()
 
-    # --- Controls (radios live, submit button in form) ----------------------
+    # --- Controls (fixed state management) ----------------------------------
     with st.sidebar:
         st.header("Scope")
 
-        # Live radios (outside the form so they update immediately)
-        st.session_state.mode = st.radio(
+        # Use radio buttons with proper key management (removed manual session state assignment)
+        mode = st.radio(
             "Analyse by",
             ["Company", "Topic"],
             horizontal=True,
-            key="mode",
+            key="mode_radio",
         )
+        st.session_state.mode = mode
 
-        st.session_state.company_input_mode = st.radio(
+        company_input_mode = st.radio(
             "Company input",
             ["Pick from list", "Type manually"],
-            key="company_input_mode",
-        ) if st.session_state.mode == "Company" else st.session_state.company_input_mode
+            key="company_input_mode_radio",
+        ) if mode == "Company" else st.session_state.get("company_input_mode", "Pick from list")
+        
+        if mode == "Company":
+            st.session_state.company_input_mode = company_input_mode
 
-        st.session_state.date_preset = st.selectbox(
+        date_preset = st.selectbox(
             "Date preset (UTC)",
             list(date_preset_dict.keys()),
-            index=list(date_preset_dict.keys()).index(st.session_state.date_preset),
-            key="date_preset",
+            index=list(date_preset_dict.keys()).index(st.session_state.get("date_preset", "this_week")),
+            key="date_preset_select",
         )
+        st.session_state.date_preset = date_preset
 
-        # Inputs driven by the radios above
-        company_name = company_ticker = None
-        topic_name = None
-
-        if st.session_state.mode == "Company":
-            if st.session_state.company_input_mode == "Pick from list":
-                choice = st.selectbox("Company", options=COMPANY_OPTIONS, key="company_select")
-                company_name, company_ticker = split_company_label(choice)
-            else:
-                typed = st.text_area("Company (name or ticker)", height=80, key="company_text").strip()
-                if typed:
-                    name, tick = resolve_company(typed)
-                    company_name, company_ticker = name, tick
-            # store for polling
-            st.session_state["company_name"] = company_name
-            st.session_state["company_ticker"] = company_ticker
-        else:
-            topic_name = st.text_input("Topic", key="topic_name").strip()
-            st.session_state["topic_name"] = topic_name
-
-        # Submit only wraps the inputs that should trigger a fetch
+        # --- Form for controlled submission ----------------------------------
         with st.form("controls_form", clear_on_submit=False):
+            company_name = company_ticker = None
+            topic_name = None
+
+            if mode == "Company":
+                if company_input_mode == "Pick from list":
+                    choice = st.selectbox("Company", options=COMPANY_OPTIONS, key="company_select")
+                    company_name, company_ticker = split_company_label(choice)
+                else:
+                    typed = st.text_area("Company (name or ticker)", height=80, key="company_text").strip()
+                    if typed:
+                        name, tick = resolve_company(typed)
+                        company_name, company_ticker = name, tick
+                
+                # Validate company input
+                if not company_name and not company_ticker:
+                    st.warning("Please select or enter a valid company.")
+                
+                # store for polling
+                st.session_state["company_name"] = company_name or company_ticker
+                st.session_state["company_ticker"] = company_ticker
+            else:
+                topic_name = st.text_input("Topic", key="topic_name").strip()
+                if not topic_name:
+                    st.warning("Please enter a topic.")
+                st.session_state["topic_name"] = topic_name
+
             generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
 
     # --- Generate on click or first run --------------------------------------
@@ -294,14 +360,20 @@ def main() -> None:
     if not view_df.empty:
         st.subheader(subtitle)
 
-        # KPIs
+        # KPIs with proper error handling
         s_col1, s_col2 = st.columns(2)
-        if "sentiment" in view_df:
+        
+        if "sentiment" in view_df.columns:
+            # Ensure sentiment is numeric and handle NaN values properly
             s_series = pd.to_numeric(view_df["sentiment"], errors="coerce").dropna()
-            avg = float(s_series.mean()) if not s_series.empty else 0.0
-            std = float(s_series.std()) if not s_series.empty else 0.0
+            if not s_series.empty:
+                avg = float(s_series.mean())
+                std = float(s_series.std())
+            else:
+                avg, std = 0.0, 0.0
         else:
             avg, std = 0.0, 0.0
+            st.warning("Sentiment data not available in the dataset.")
 
         s_col1.metric("Avg Sentiment", f"{avg:.2f}")
         s_col2.metric("Sentiment Std Dev", f"{std:.2f}")
@@ -310,24 +382,29 @@ def main() -> None:
         fig_scale = sentiment_scale(avg)
         st.plotly_chart(fig_scale, use_container_width=True)
 
-        # Distribution + box
-        c1, c2 = st.columns(2)
-        if "sentiment" in view_df:
+        # Distribution + box (only if sentiment data exists)
+        if "sentiment" in view_df.columns and not view_df["sentiment"].isna().all():
+            c1, c2 = st.columns(2)
+            
             fig_hist = px.histogram(view_df, x="sentiment", nbins=30, marginal="rug",
-                                    color="source_name", title="Sentiment Score Distribution")
+                                    color="source_name" if "source_name" in view_df.columns else None, 
+                                    title="Sentiment Score Distribution")
             c1.plotly_chart(fig_hist, use_container_width=True)
 
-            fig_box = px.box(view_df, y="sentiment", points="all", color="source_name",
+            fig_box = px.box(view_df, y="sentiment", points="all", 
+                             color="source_name" if "source_name" in view_df.columns else None,
                              title="Sentiment Box Plot")
             c2.plotly_chart(fig_box, use_container_width=True)
 
-        # Sentiment over time
-        if "timestamp" in view_df and "sentiment" in view_df:
+        # Sentiment over time (only if both timestamp and sentiment exist)
+        if "timestamp" in view_df.columns and "sentiment" in view_df.columns and not view_df["sentiment"].isna().all():
             ts_df = view_df.sort_values("timestamp", ascending=True).copy()
-            ts_df["moving_avg_sentiment"] = pd.to_numeric(ts_df["sentiment"], errors="coerce").expanding().mean()
+            # Pre-convert sentiment to numeric to avoid repeated conversions
+            ts_df["sentiment_numeric"] = pd.to_numeric(ts_df["sentiment"], errors="coerce")
+            ts_df["moving_avg_sentiment"] = ts_df["sentiment_numeric"].expanding().mean()
 
-            fig_ts = px.scatter(ts_df, x="timestamp", y="sentiment",
-                                hover_data=[c for c in ts_df.columns if c not in {"timestamp", "sentiment"}])
+            fig_ts = px.scatter(ts_df, x="timestamp", y="sentiment_numeric",
+                                hover_data=[c for c in ts_df.columns if c not in {"timestamp", "sentiment", "sentiment_numeric"}])
             fig_ts.add_trace(go.Scatter(x=ts_df["timestamp"], y=ts_df["moving_avg_sentiment"],
                                         mode="lines", name="Moving Avg Sentiment"))
             fig_ts.add_hline(y=0, line_color="gray", opacity=0.6)
@@ -345,7 +422,7 @@ def main() -> None:
             view_df,
             use_container_width=True,
             hide_index=True,
-            column_config={"url": st.column_config.LinkColumn(display_text="Link")},
+            column_config={"url": st.column_config.LinkColumn(display_text="Link")} if "url" in view_df.columns else None,
         )
     else:
         st.info("No news to summarise yet. Choose a Company or Topic, then click **Get Sentiment Analysis**.")
@@ -362,21 +439,30 @@ def main() -> None:
             "Only use the provided information.\n"
         )
 
-        # Use your own conversion if needed; we’ll simply pass the table as JSON here.
+        # Use your own conversion if needed; we'll simply pass the table as JSON here.
         chunks_as_text = view_df.to_json(orient="records")
 
-        with st.spinner("Summarising..."):
-            llm_client = get_llm_client()
-            llm_resp = generate_response(llm_client, chunks_as_text, default_prompt)  # -> {"content": "..."}
-            content = llm_resp.get("content", "")
+        llm_client = get_llm_client()
+        if llm_client is not None:
+            try:
+                with st.spinner("Summarising..."):
+                    llm_resp = generate_response(llm_client, chunks_as_text, default_prompt)  # -> {"content": "..."}
+                    content = llm_resp.get("content", "")
 
-            score = extract_sentiment_score(content)
-            st.session_state["summary_text"] = content
-            st.session_state["llm_sentiment"] = float(score) if score is not None else None
+                    score = extract_sentiment_score(content)
+                    st.session_state["summary_text"] = content
+                    st.session_state["llm_sentiment"] = float(score) if score is not None else None
 
-        # Render
-        st.metric("LLM Sentiment", f"{st.session_state['llm_sentiment']:.2f}" if st.session_state["llm_sentiment"] is not None else "—")
-        st.markdown(st.session_state["summary_text"])
+                # Render
+                if st.session_state["llm_sentiment"] is not None:
+                    st.metric("LLM Sentiment", f"{st.session_state['llm_sentiment']:.2f}")
+                else:
+                    st.metric("LLM Sentiment", "—")
+                st.markdown(st.session_state["summary_text"])
+            except Exception as e:
+                st.error(f"Failed to generate summary: {e}")
+        else:
+            st.error("LLM client not available. Cannot generate summary.")
 
     # --- Footer ---------------------------------------------------------------
     st.caption("© MAAS Execution Analytics")
