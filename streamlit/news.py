@@ -178,18 +178,43 @@ def main():
 
     # --- Sidebar controls
     with st.sidebar:
-        st.header("Scope")
-        st.session_state.mode = st.radio("Analyse by", ["Company", "Topic"])
-        st.session_state.date_preset = st.selectbox("Date range", list(date_preset_dict.keys()))
+    st.header("Scope")
 
-        if st.session_state.mode == "Company":
-            st.session_state.company_name = st.selectbox(
-                "Company", [c["name"] for c in COMPANIES])
-        else:
-            st.session_state.topic_name = st.text_input("Topic", st.session_state.topic_name)
+    # Mode selection
+    st.session_state.mode = st.radio(
+        "Analyse by",
+        ["Company", "Topic"],
+        index=0 if st.session_state.mode == "Company" else 1,
+    )
 
-        if st.button("🧠 Get Sentiment Analysis"):
-            fetch_and_update_news()
+    # Date preset selection
+    preset_keys = list(date_preset_dict.keys())
+    current_preset = st.session_state.get("date_preset", preset_keys[0])
+    st.session_state.date_preset = st.selectbox(
+        "Date range",
+        preset_keys,
+        index=preset_keys.index(current_preset) if current_preset in preset_keys else 0,
+    )
+
+    # Company or topic input
+    if st.session_state.mode == "Company":
+        company_names = [c["name"] for c in COMPANIES]
+        current_company = st.session_state.get("company_name") or company_names[0]
+        st.session_state.company_name = st.selectbox(
+            "Company",
+            company_names,
+            index=company_names.index(current_company)
+            if current_company in company_names
+            else 0,
+        )
+    else:
+        st.session_state.topic_name = st.text_input(
+            "Topic",
+            value=st.session_state.get("topic_name", ""),
+        )
+
+    if st.button("🧠 Get Sentiment Analysis"):
+        fetch_and_update_news()
 
     # --- Data + charts
     news = st.session_state.news or {}
