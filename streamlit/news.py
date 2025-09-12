@@ -14,11 +14,6 @@ import matplotlib.colors as mcolors
 import streamlit as st
 
 # --- External helpers you said live elsewhere -------------------------------
-# Provide these in your own module.
-# - get_oauth_token() -> str
-# - get_news_data(type_of_search: str, search_string: str, date_preset: str) -> Dict[str, Any]
-# - generate_response(llm_client, xml_str_or_text: str, system_prompt: str) -> Dict[str, str]  # returns {"content": "..."}
-# - extract_sentiment_score(llm_content: str) -> Optional[float]
 from services import (
     get_oauth_token,
     get_news_data,
@@ -41,7 +36,6 @@ COMPANIES: List[Dict[str, str]] = [
 POLL_INTERVAL_SECONDS = 60
 CACHE_TTL_SECONDS = 60
 
-# Your presets – keys are what the user sees, values are your backend enums/strings.
 date_preset_dict: Dict[str, str] = {
     "today": "TODAY",
     "yesterday": "YESTERDAY",
@@ -75,9 +69,7 @@ COMPANY_OPTIONS = [f"{c['name']} ({c['ticker']})" for c in COMPANIES]
 def get_llm_client():
     """Get cached LLM client instance."""
     try:
-        token = get_oauth_token()  # Ensure token available/valid
-        # Return a proper client object instead of generic object()
-        # This is still a placeholder but better structured
+        token = get_oauth_token()
         class MockLLMClient:
             def __init__(self, token: str):
                 self.token = token
@@ -88,7 +80,7 @@ def get_llm_client():
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def get_news_cached(search_type: str, query: str, preset_key: str) -> Dict[str, Any]:
-    """Cache API calls for 60s to avoid hammering the backend while polling."""
+    """Cache API calls to avoid hammering the backend while polling."""
     if not query or not query.strip():
         return {"res": pd.DataFrame(), "info": {}}
     
@@ -113,12 +105,10 @@ def log_event(event: str, payload: Optional[Dict[str, Any]] = None, level: str =
         with file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception:
-        # Don't break the app on logging problems
         pass
 
 def colour_for_score(score: float) -> str:
     """Return a hex colour from a diverging colormap based on score in [-1, 1]."""
-    # Clamp score to valid range
     score = max(-1.0, min(1.0, score))
     norm = mcolors.Normalize(vmin=-1, vmax=1)
     cmap = mcolors.get_cmap("RdYlGn")
@@ -146,46 +136,35 @@ def resolve_company(user_typed: str) -> Tuple[Optional[str], Optional[str]]:
     # Try to find ticker by company name
     if normalized_input in TICKER_BY_NAME:
         ticker = TICKER_BY_NAME[normalized_input]
-        name = user_typed.strip()  # Use original case for display
+        name = user_typed.strip()
         return name, ticker
     
     # Try to find name by ticker
     if normalized_input in NAME_BY_TICKER:
         name = NAME_BY_TICKER[normalized_input]
-        ticker = user_typed.strip().upper()  # Normalize ticker to uppercase
+        ticker = user_typed.strip().upper()
         return name, ticker
     
-    # If not found in our predefined lists, treat as manual input
-    # Assume it's a ticker if it's short and uppercase-ish, otherwise assume it's a company name
+    # If not found, treat as manual input
     cleaned_input = user_typed.strip()
     if len(cleaned_input) <= 5 and cleaned_input.isupper():
         return None, cleaned_input  # Treat as ticker
     else:
         return cleaned_input, None  # Treat as company name
 
-# --- Session state (single source of truth) ----------------------------------
+# --- Session state -----------------------------------------------------------
 def init_state() -> None:
-    st.session_state.setdefault("mode", "Company")              # "Company" or "Topic"
-    st.session_state.setdefault("company_input_mode", "Pick from list")  # or "Type manually"
+    st.session_state.setdefault("mode", "Company")
+    st.session_state.setdefault("company_input_mode", "Pick from list")
     st.session_state.setdefault("date_preset", "this_week")
-
     st.session_state.setdefault("polling", False)
     st.session_state.setdefault("next_poll_at", None)
-
-    # News container:
-    # st.session_state["news"] = {"docs": pd.DataFrame, "info": {...}}
     st.session_state.setdefault("news", None)
-
-    # LLM outputs
     st.session_state.setdefault("summary_text", "")
     st.session_state.setdefault("llm_sentiment", None)
-
-    # UI placeholders
-    st.session_state.setdefault("summary_ph", None)
-    st.session_state.setdefault("sentiment_line_ph", None)
     st.session_state.setdefault("last_update", None)
 
-# --- Polling (non-blocking) --------------------------------------------------
+# --- Polling ------------------------------------------------------------------
 def fetch_and_update_news() -> None:
     """Fetch and merge news, update state, no blocking."""
     mode = st.session_state.mode
@@ -226,36 +205,66 @@ def fetch_and_update_news() -> None:
     log_event("news_fetched", {"rows": int(len(df))})
 
 def maybe_poll() -> None:
+    """Handle polling - checks if it's time to poll on each page interaction."""
     if not st.session_state.polling:
         return
+    
     now = datetime.utcnow()
     due = st.session_state.next_poll_at is None or now >= st.session_state.next_poll_at
+    
     if due:
         fetch_and_update_news()
         st.session_state.next_poll_at = now + timedelta(seconds=POLL_INTERVAL_SECONDS)
         st.toast("Polled for updates")
 
+def add_auto_refresh() -> None:
+    """Add JavaScript-based auto-refresh when polling is enabled."""
+    if st.session_state.polling:
+        st.markdown(
+            """
+            <script>
+            setTimeout(function(){
+                window.location.reload(1);
+            }, 30000);
+            </script>
+            """,
+            unsafe_allow_html=True
+        )
+
 # --- UI helpers --------------------------------------------------------------
 def top_status_row() -> None:
-    c1, c2 = st.columns([1, 1])  # Fixed: removed unused third column
+    c1, c2, c3 = st.columns([1, 1, 1])
     last = st.session_state.last_update
     c1.caption(f"Last refresh: {last:%H:%M:%S} UTC" if last else "Last refresh: —")
-    c2.caption("Polling: ✅" if st.session_state.polling else "Polling: ⛔")
     
-    if st.button("🔁 Start / Stop Updates", use_container_width=False):
-        st.session_state.polling = not st.session_state.polling
-        if st.session_state.polling:
-            st.session_state.next_poll_at = datetime.utcnow()  # poll immediately
-            st.toast("Polling started")
+    # Enhanced polling status
+    if st.session_state.polling:
+        next_poll = st.session_state.next_poll_at
+        if next_poll:
+            seconds_until = (next_poll - datetime.utcnow()).total_seconds()
+            if seconds_until > 0:
+                c2.caption(f"Polling: ✅ (next in {int(seconds_until)}s)")
+            else:
+                c2.caption("Polling: ✅ (due now)")
         else:
-            st.toast("Polling stopped")
-        st.rerun()
+            c2.caption("Polling: ✅ (starting)")
+    else:
+        c2.caption("Polling: ⛔")
+    
+    with c3:
+        if st.button("🔁 Start / Stop Updates", use_container_width=True):
+            st.session_state.polling = not st.session_state.polling
+            if st.session_state.polling:
+                st.session_state.next_poll_at = datetime.utcnow()
+                st.toast("Polling started")
+            else:
+                st.toast("Polling stopped")
+            st.rerun()
 
 def sentiment_scale(avg: float) -> go.Figure:
-    # Validate input
     if not isinstance(avg, (int, float)) or pd.isna(avg):
         avg = 0.0
-    avg = max(-1.0, min(1.0, avg))  # Clamp to valid range
+    avg = max(-1.0, min(1.0, avg))
     
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=[-1, 1], y=[0, 0], mode="lines",
@@ -278,80 +287,130 @@ def sentiment_scale(avg: float) -> go.Figure:
     )
     return fig
 
-# --- App ---------------------------------------------------------------------
+# --- Main App ----------------------------------------------------------------
 def main() -> None:
     init_logger()
     init_state()
-    maybe_poll()  # non-blocking periodic work
+    maybe_poll()
+    add_auto_refresh()
 
     st.title("Sentiment Analysis")
     top_status_row()
     st.divider()
 
-    # --- Controls (fixed state management) ----------------------------------
+    # --- Sidebar Controls (COMPLETELY FIXED) --------------------------------
     with st.sidebar:
         st.header("Scope")
 
-        # Use radio buttons with proper key management (removed manual session state assignment)
-        mode = st.radio(
+        # Get current session state values for defaults
+        current_mode = st.session_state.get("mode", "Company")
+        current_company_mode = st.session_state.get("company_input_mode", "Pick from list")
+        current_preset = st.session_state.get("date_preset", "this_week")
+
+        # Create widgets with unique keys
+        selected_mode = st.radio(
             "Analyse by",
             ["Company", "Topic"],
+            index=0 if current_mode == "Company" else 1,
             horizontal=True,
-            key="mode_radio",
+            key="analysis_mode_widget"
         )
-        st.session_state.mode = mode
 
-        company_input_mode = st.radio(
-            "Company input",
-            ["Pick from list", "Type manually"],
-            key="company_input_mode_radio",
-        ) if mode == "Company" else st.session_state.get("company_input_mode", "Pick from list")
-        
-        if mode == "Company":
-            st.session_state.company_input_mode = company_input_mode
+        if selected_mode == "Company":
+            selected_company_mode = st.radio(
+                "Company input",
+                ["Pick from list", "Type manually"],
+                index=0 if current_company_mode == "Pick from list" else 1,
+                key="company_input_mode_widget"
+            )
+        else:
+            selected_company_mode = current_company_mode
 
-        date_preset = st.selectbox(
+        selected_preset = st.selectbox(
             "Date preset (UTC)",
             list(date_preset_dict.keys()),
-            index=list(date_preset_dict.keys()).index(st.session_state.get("date_preset", "this_week")),
-            key="date_preset_select",
+            index=list(date_preset_dict.keys()).index(current_preset),
+            key="date_preset_widget"
         )
-        st.session_state.date_preset = date_preset
 
-        # --- Form for controlled submission ----------------------------------
-        with st.form("controls_form", clear_on_submit=False):
-            company_name = company_ticker = None
-            topic_name = None
+        # Update session state
+        st.session_state.mode = selected_mode
+        st.session_state.company_input_mode = selected_company_mode
+        st.session_state.date_preset = selected_preset
 
-            if mode == "Company":
-                if company_input_mode == "Pick from list":
-                    choice = st.selectbox("Company", options=COMPANY_OPTIONS, key="company_select")
-                    company_name, company_ticker = split_company_label(choice)
+        # --- FORM SECTION ----------------------------------------------------
+        with st.form("analysis_form"):
+            company_name = company_ticker = topic_name = None
+
+            if selected_mode == "Company":
+                if selected_company_mode == "Pick from list":
+                    # Default selection based on current company
+                    current_company = st.session_state.get("company_name", "")
+                    default_idx = 0
+                    for i, option in enumerate(COMPANY_OPTIONS):
+                        if current_company and current_company in option:
+                            default_idx = i
+                            break
+
+                    selected_company = st.selectbox(
+                        "Company",
+                        options=COMPANY_OPTIONS,
+                        index=default_idx,
+                        key="form_company_dropdown"
+                    )
+                    company_name, company_ticker = split_company_label(selected_company)
                 else:
-                    typed = st.text_area("Company (name or ticker)", height=80, key="company_text").strip()
-                    if typed:
-                        name, tick = resolve_company(typed)
-                        company_name, company_ticker = name, tick
-                
-                # Validate company input
-                if not company_name and not company_ticker:
-                    st.warning("Please select or enter a valid company.")
-                
-                # store for polling
-                st.session_state["company_name"] = company_name or company_ticker
-                st.session_state["company_ticker"] = company_ticker
+                    # Manual company input
+                    current_value = st.session_state.get("company_name", "") or st.session_state.get("company_ticker", "")
+                    company_input = st.text_area(
+                        "Company (name or ticker)",
+                        value=current_value,
+                        height=80,
+                        key="form_company_manual"
+                    )
+                    if company_input.strip():
+                        company_name, company_ticker = resolve_company(company_input.strip())
             else:
-                topic_name = st.text_input("Topic", key="topic_name").strip()
-                if not topic_name:
-                    st.warning("Please enter a topic.")
-                st.session_state["topic_name"] = topic_name
+                # Topic input
+                current_topic = st.session_state.get("topic_name", "")
+                topic_input = st.text_input(
+                    "Topic",
+                    value=current_topic,
+                    key="form_topic_input"
+                )
+                topic_name = topic_input.strip() if topic_input else None
 
-            generate = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
+            # Form submit
+            submitted = st.form_submit_button("🧠 Get Sentiment Analysis", use_container_width=True)
 
-    # --- Generate on click or first run --------------------------------------
-    if generate or st.session_state.get("news") is None:
+            # Update session state only on form submit
+            if submitted:
+                if selected_mode == "Company":
+                    st.session_state["company_name"] = company_name or company_ticker or ""
+                    st.session_state["company_ticker"] = company_ticker or ""
+                else:
+                    st.session_state["topic_name"] = topic_name or ""
+
+    # --- Manual refresh button ----------------------------------------------
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        refresh_clicked = st.button("🔄 Refresh Data")
+
+    # --- Data fetching logic -------------------------------------------------
+    # Auto-load default on first visit
+    if st.session_state.get("news") is None and not submitted and not refresh_clicked:
+        if selected_mode == "Company" and not st.session_state.get("company_name"):
+            default_company = COMPANIES[0]
+            st.session_state["company_name"] = default_company["name"]
+            st.session_state["company_ticker"] = default_company["ticker"]
+
+    # Fetch data
+    if submitted or refresh_clicked:
+        fetch_and_update_news()
+    elif st.session_state.get("news") is None and st.session_state.get("company_name"):
         fetch_and_update_news()
 
+    # --- Display results -----------------------------------------------------
     news = st.session_state.get("news") or {}
     view_df: pd.DataFrame = news.get("docs", pd.DataFrame())
     info: Dict[str, Any] = news.get("info", {})
@@ -364,7 +423,6 @@ def main() -> None:
         s_col1, s_col2 = st.columns(2)
         
         if "sentiment" in view_df.columns:
-            # Ensure sentiment is numeric and handle NaN values properly
             s_series = pd.to_numeric(view_df["sentiment"], errors="coerce").dropna()
             if not s_series.empty:
                 avg = float(s_series.mean())
@@ -396,10 +454,9 @@ def main() -> None:
                              title="Sentiment Box Plot")
             c2.plotly_chart(fig_box, use_container_width=True)
 
-        # Sentiment over time (only if both timestamp and sentiment exist)
+        # Sentiment over time
         if "timestamp" in view_df.columns and "sentiment" in view_df.columns and not view_df["sentiment"].isna().all():
             ts_df = view_df.sort_values("timestamp", ascending=True).copy()
-            # Pre-convert sentiment to numeric to avoid repeated conversions
             ts_df["sentiment_numeric"] = pd.to_numeric(ts_df["sentiment"], errors="coerce")
             ts_df["moving_avg_sentiment"] = ts_df["sentiment_numeric"].expanding().mean()
 
@@ -439,14 +496,13 @@ def main() -> None:
             "Only use the provided information.\n"
         )
 
-        # Use your own conversion if needed; we'll simply pass the table as JSON here.
         chunks_as_text = view_df.to_json(orient="records")
 
         llm_client = get_llm_client()
         if llm_client is not None:
             try:
                 with st.spinner("Summarising..."):
-                    llm_resp = generate_response(llm_client, chunks_as_text, default_prompt)  # -> {"content": "..."}
+                    llm_resp = generate_response(llm_client, chunks_as_text, default_prompt)
                     content = llm_resp.get("content", "")
 
                     score = extract_sentiment_score(content)
