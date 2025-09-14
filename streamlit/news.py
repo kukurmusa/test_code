@@ -14,6 +14,11 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # --- External helpers (implement in services.py) -----------------------------
+# Expected signatures:
+#   get_news_data(type_of_search: str, search_string: str, date_preset: str) -> dict  # {"res": DataFrame, "info": {...}}
+#   generate_response(llm_client_or_token, text: str, system_prompt: str) -> dict      # {"content": "..."}
+#   extract_sentiment_score(text: str) -> Optional[float]
+#   get_oauth_token() -> str | client
 from services import (
     get_oauth_token,
     get_news_data,
@@ -44,26 +49,26 @@ POLL_INTERVAL = 60  # seconds
 
 # --- State & logging ---------------------------------------------------------
 def init_state() -> None:
-    st.session_state.setdefault("mode", "Company")                 # "Company" | "Topic" | "Company + Topic"
-    st.session_state.setdefault("company_input_mode", "Pick from list")  # "Pick from list" | "Type manually"
-
-    st.session_state.setdefault("company_name", COMPANIES[2]["name"])  # default Alphabet
+    st.session_state.setdefault("mode", "Company")                        # "Company" | "Topic" | "Company + Topic"
+    st.session_state.setdefault("company_input_mode", "Pick from list")   # "Pick from list" | "Type manually"
+    st.session_state.setdefault("company_name", COMPANIES[2]["name"])     # default Alphabet
     st.session_state.setdefault("topic_name", "")
     st.session_state.setdefault("date_preset", "this_week")
 
     st.session_state.setdefault("polling", False)
     st.session_state.setdefault("news", None)
 
-    # New-content detection (avoid false positives when rolling window drops old items)
-    st.session_state.setdefault("_latest_ts", None)        # most recent timestamp seen (tz-aware)
-    st.session_state.setdefault("_latest_ts_count", 0)     # how many rows share that timestamp
+    # New-content detection (prevents false positives on rolling windows)
+    st.session_state.setdefault("_latest_ts", None)        # most recent article timestamp (tz-aware)
+    st.session_state.setdefault("_latest_ts_count", 0)     # number of rows sharing that timestamp
 
     # Summary state
-    st.session_state.setdefault("summary_stale", True)     # mark True when new articles land
+    st.session_state.setdefault("summary_stale", True)     # set True when new articles land
     st.session_state.setdefault("summary_text", "")
     st.session_state.setdefault("llm_sentiment", None)
 
-    st.session_state.setdefault("last_update", None)
+    # Timestamps for UI
+    st.session_state.setdefault("last_update", None)       # shown in Status Panel
 
     # Simple JSONL logger
     log_dir = Path("logs")
@@ -78,7 +83,7 @@ def log_event(event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         with file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception:
-        pass  # never break UI due to logging
+        pass  # don't break the UI for logging
 
 # --- Utilities ---------------------------------------------------------------
 def colour_for_score(score: float) -> str:
@@ -108,11 +113,12 @@ def _latest_tip(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], int]:
 
 
 def fetch_and_update_news() -> None:
-    """Fetch, normalise, and update state; mark summary stale only on truly newer content."""
+    """Fetch, normalise, update state; set summary_stale only when truly newer content arrives."""
     mode = st.session_state.mode
     preset_key = st.session_state.date_preset
     preset_val = DATE_PRESETS[preset_key]
 
+    # Fetch
     if mode == "Company":
         company = (st.session_state.company_name or "").strip()
         res = get_news_data("COMPANY", company, preset_val)
@@ -133,9 +139,10 @@ def fetch_and_update_news() -> None:
         res = {"res": pd.DataFrame(), "info": {}}
         subtitle = "Invalid mode"
 
+    # Normalise
     df = _normalise_df(res.get("res") if isinstance(res, dict) else pd.DataFrame())
 
-    # Latest-tip change detection (prevents false positives from rolling windows)
+    # Change detection based on latest timestamp (+ tie-count)
     prev_latest = st.session_state.get("_latest_ts")
     prev_count = st.session_state.get("_latest_ts_count", 0)
     latest_ts, latest_count = _latest_tip(df)
@@ -147,6 +154,7 @@ def fetch_and_update_news() -> None:
         elif (latest_ts == prev_latest) and (latest_count > prev_count):
             changed = True
 
+    # Persist and flag
     st.session_state["_latest_ts"] = latest_ts
     st.session_state["_latest_ts_count"] = latest_count
     if changed:
@@ -193,15 +201,26 @@ def sentiment_scale(avg: float) -> go.Figure:
     )
     return fig
 
-# --- Status panel ------------------------------------------------------------
+# --- Status panel (compact, with Toggle) -------------------------------------
 def status_panel():
-    st.markdown("### 🟢 Status Panel")
-    col1, col2, col3 = st.columns(3)
-    last_refresh = st.session_state.last_update
-    latest_ts = st.session_state.get("_latest_ts")
-    col1.metric("Polling", "ON ✅" if st.session_state.polling else "OFF ⛔")
-    col2.metric("Last refresh", f"{last_refresh:%H:%M:%S} UTC" if last_refresh else "—")
-    col3.metric("Latest Article", latest_ts.strftime("%Y-%m-%d %H:%M:%S") if latest_ts else "—")
+    st.markdown("#### 🟢 Status Panel")
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
+    polling = "✅ ON" if st.session_state.polling else "⛔ OFF"
+    last_refresh = (st.session_state.last_update.strftime("%H:%M:%S UTC")
+                    if st.session_state.last_update else "—")
+    latest_article = (st.session_state["_latest_ts"].strftime("%Y-%m-%d %H:%M:%S")
+                      if st.session_state["_latest_ts"] else "—")
+
+    col1.caption(f"**Polling:** {polling}")
+    col2.caption(f"**Last refresh:** {last_refresh}")
+    col3.caption(f"**Latest article:** {latest_article}")
+
+    if col4.button("🔁 Toggle", use_container_width=True):
+        st.session_state.polling = not st.session_state.polling
+        st.toast("Polling started" if st.session_state.polling else "Polling stopped")
+        log_event("poll_toggle", {"on": st.session_state.polling})
+        st.experimental_rerun()
 
 # --- Top words/topics chart --------------------------------------------------
 def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
@@ -232,23 +251,26 @@ def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
 def main() -> None:
     init_state()
 
-    # Polling toggle & conditional auto-refresh
-    c1, c2, c3 = st.columns([1, 1, 1])
-    last = st.session_state.last_update
-    c1.caption(f"Last refresh: {last:%H:%M:%S} UTC" if last else "Last refresh: —")
-    c2.caption("Polling: ✅" if st.session_state.polling else "Polling: ⛔")
-    if c3.button("🔁 Toggle Polling", use_container_width=True):
-        st.session_state.polling = not st.session_state.polling
-        st.toast("Polling started" if st.session_state.polling else "Polling stopped")
-        log_event("poll_toggle", {"on": st.session_state.polling})
-        st.experimental_rerun()
+    # Conditional auto-rerun (true polling) only when polling ON
     if st.session_state.polling:
         st_autorefresh(interval=POLL_INTERVAL * 1000, key="poller")
 
     st.title("Sentiment Analysis")
     st.divider()
 
-    # Sidebar scope & filters
+    # Poll on each run (does work only when polling ON)
+    maybe_poll()
+
+    # Current news (pre-filter)
+    news = st.session_state.news or {}
+    df_all = news.get("docs", pd.DataFrame())
+    subtitle = news.get("info", {}).get("subtitle", "")
+
+    # --- Compact Status Panel (with Toggle) ---------------------------------
+    status_panel()
+    st.divider()
+
+    # --- Sidebar: Scope (top) + Filters (bottom) ----------------------------
     with st.sidebar:
         st.header("Scope")
         st.session_state.mode = st.radio(
@@ -286,30 +308,26 @@ def main() -> None:
         if st.button("🧠 Get Sentiment Analysis", use_container_width=True):
             fetch_and_update_news()
 
-    # Poll on each run (only does work when polling is ON)
-    maybe_poll()
+        # Divider between Scope and Filters
+        st.markdown("---")
+        st.subheader("Filters")
 
-    # Use current news (pre-filter)
-    news = st.session_state.news or {}
-    df_all = news.get("docs", pd.DataFrame())
-    subtitle = news.get("info", {}).get("subtitle", "")
+        # Build filter options from current data (unfiltered)
+        if "source_name" in df_all.columns:
+            sources = sorted(df_all["source_name"].dropna().unique())
+            selected_sources = st.multiselect("Source", options=sources, default=sources)
+        else:
+            selected_sources = None
 
-    # Status panel (always visible)
-    status_panel()
+        sentiment_bucket = st.selectbox("Sentiment bucket", ["All", "Positive", "Neutral", "Negative"])
+        keyword = st.text_input("Keyword search in headlines/snippets", "")
 
-    # Filters
-    st.subheader("Filters")
+    # --- Apply filters to produce df ----------------------------------------
     df = df_all.copy()
 
-    # Source filter
-    if "source_name" in df.columns:
-        sources = sorted(df["source_name"].dropna().unique())
-        selected_sources = st.multiselect("Source", options=sources, default=sources)
-        if selected_sources:
-            df = df[df["source_name"].isin(selected_sources)]
+    if selected_sources:
+        df = df[df["source_name"].isin(selected_sources)]
 
-    # Sentiment bucket filter
-    sentiment_bucket = st.selectbox("Sentiment bucket", ["All", "Positive", "Neutral", "Negative"])
     if sentiment_bucket != "All" and "sentiment" in df.columns:
         s = pd.to_numeric(df["sentiment"], errors="coerce")
         if sentiment_bucket == "Positive":
@@ -319,15 +337,13 @@ def main() -> None:
         else:
             df = df[s.between(-0.1, 0.1)]
 
-    # Keyword filter (title/summary/content)
-    keyword = st.text_input("Keyword search in headlines/snippets", "")
     if keyword:
         mask = pd.Series(False, index=df.index)
         for col in [c for c in df.columns if any(k in c.lower() for k in ["title", "summary", "content"])]:
             mask |= df[col].astype(str).str.contains(keyword, case=False, na=False)
         df = df[mask]
 
-    # Display results (filtered df)
+    # --- Display results (filtered df) --------------------------------------
     if not df.empty:
         st.subheader(subtitle)
 
@@ -367,11 +383,11 @@ def main() -> None:
     else:
         st.info("No news yet. Choose a scope and click **Get Sentiment Analysis**.")
 
-    # Executive summary (based on CURRENT FILTERED DF)
+    # --- Executive summary (uses FILTERED df) --------------------------------
     if not df.empty:
         st.subheader("Executive Summary")
 
-        # New: Button to refresh LLM summary using current filters
+        # Button to refresh LLM summary using current filters
         refresh_summary = st.button("🔄 Refresh Executive Summary", use_container_width=True)
 
         if st.session_state.summary_stale or refresh_summary:
@@ -387,6 +403,8 @@ def main() -> None:
                 st.session_state.summary_text = content
                 st.session_state.llm_sentiment = float(score) if score is not None else None
                 st.session_state.summary_stale = False
+                # If you want Last refresh to reflect summary-only refreshes too:
+                st.session_state.last_update = datetime.utcnow()
             log_event("summary_generated", {
                 "latest_ts": st.session_state["_latest_ts"].isoformat() if st.session_state["_latest_ts"] else None,
                 "filtered_rows": int(len(df)),
