@@ -14,11 +14,6 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # --- External helpers (implement in services.py) -----------------------------
-# Expected signatures:
-#   get_news_data(type_of_search: str, search_string: str, date_preset: str) -> dict  # {"res": DataFrame, "info": {...}}
-#   generate_response(llm_client_or_token, text: str, system_prompt: str) -> dict      # {"content": "..."}
-#   extract_sentiment_score(text: str) -> Optional[float]
-#   get_oauth_token() -> str | client
 from services import (
     get_oauth_token,
     get_news_data,
@@ -63,7 +58,7 @@ def init_state() -> None:
     st.session_state.setdefault("_latest_ts_count", 0)     # number of rows sharing that timestamp
 
     # Summary state
-    st.session_state.setdefault("summary_stale", True)     # set True when new articles land
+    st.session_state.setdefault("summary_stale", True)     # set True when new articles or scope changes
     st.session_state.setdefault("summary_text", "")
     st.session_state.setdefault("llm_sentiment", None)
 
@@ -273,40 +268,64 @@ def main() -> None:
     # --- Sidebar: Scope (top) + Filters (bottom) ----------------------------
     with st.sidebar:
         st.header("Scope")
-        st.session_state.mode = st.radio(
+
+        # Track changes to invalidate the LLM summary when scope changes
+        current_mode = st.session_state.mode
+        new_mode = st.radio(
             "Analyse by", ["Company", "Topic", "Company + Topic"],
-            index=["Company", "Topic", "Company + Topic"].index(st.session_state.mode),
+            index=["Company", "Topic", "Company + Topic"].index(current_mode),
         )
+        if new_mode != current_mode:
+            st.session_state.mode = new_mode
+            st.session_state.summary_stale = True  # <- ensure LLM reruns on scope change
 
         preset_keys = list(DATE_PRESETS.keys())
-        st.session_state.date_preset = st.selectbox(
+        current_preset = st.session_state.date_preset
+        new_preset = st.selectbox(
             "Date range (UTC)", preset_keys,
-            index=preset_keys.index(st.session_state.date_preset),
+            index=preset_keys.index(current_preset),
         )
+        if new_preset != current_preset:
+            st.session_state.date_preset = new_preset
+            st.session_state.summary_stale = True  # <- likely to change dataset
 
         if st.session_state.mode in ["Company", "Company + Topic"]:
-            st.session_state.company_input_mode = st.radio(
+            current_company_mode = st.session_state.company_input_mode
+            new_company_mode = st.radio(
                 "Company input", ["Pick from list", "Type manually"],
-                index=0 if st.session_state.company_input_mode == "Pick from list" else 1,
+                index=0 if current_company_mode == "Pick from list" else 1,
             )
+            if new_company_mode != current_company_mode:
+                st.session_state.company_input_mode = new_company_mode
+                # (input mode change alone doesn't force LLM unless value changes)
+
             if st.session_state.company_input_mode == "Pick from list":
                 company_names = [c["name"] for c in COMPANIES]
-                st.session_state.company_name = st.selectbox(
+                current_company = st.session_state.company_name or company_names[0]
+                new_company = st.selectbox(
                     "Company", company_names,
-                    index=company_names.index(st.session_state.company_name),
+                    index=company_names.index(current_company) if current_company in company_names else 0,
                 )
             else:
-                st.session_state.company_name = st.text_input(
+                new_company = st.text_input(
                     "Company (name or ticker)", value=st.session_state.company_name,
                 )
 
-        if st.session_state.mode in ["Topic", "Company + Topic"]:
-            st.session_state.topic_name = st.text_input(
-                "Topic", value=st.session_state.topic_name,
-            )
+            if new_company != st.session_state.company_name:
+                st.session_state.company_name = new_company
+                st.session_state.summary_stale = True  # <- ensure LLM reruns when company changes
 
+        if st.session_state.mode in ["Topic", "Company + Topic"]:
+            current_topic = st.session_state.topic_name
+            new_topic = st.text_input("Topic", value=current_topic)
+            if new_topic != current_topic:
+                st.session_state.topic_name = new_topic
+                st.session_state.summary_stale = True  # <- ensure LLM reruns when topic changes
+
+        # Fetch button (force rerun so first click renders new data immediately)
         if st.button("🧠 Get Sentiment Analysis", use_container_width=True):
             fetch_and_update_news()
+            st.experimental_rerun()
 
         # Divider between Scope and Filters
         st.markdown("---")
@@ -371,10 +390,21 @@ def main() -> None:
             fig.add_hline(y=0, line_color="gray", opacity=0.6)
             st.plotly_chart(fig, use_container_width=True)
 
+        # Table (sentiment styled: bold + 2dp + fixed gradient)
         cfg = {}
         if "url" in df.columns:
             cfg["url"] = st.column_config.LinkColumn(display_text="Link")
-        st.dataframe(df, use_container_width=True, hide_index=True, column_config=cfg)
+
+        if "sentiment" in df.columns:
+            styled_df = (
+                df.style
+                .format({"sentiment": "{:.2f}"})
+                .set_properties(subset=["sentiment"], **{"font-weight": "bold"})
+                .background_gradient(subset=["sentiment"], cmap="RdYlGn", vmin=-1, vmax=1)
+            )
+            st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config=cfg)
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True, column_config=cfg)
 
         # Top words chart
         fig_words = plot_top_words(df, ["title", "summary"])
