@@ -14,6 +14,10 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 # --- External helpers (implement in services.py) -----------------------------
+# get_news_data(type_of_search: str, search_string: str, date_preset: str) -> {"res": DataFrame, "info": {...}}
+# generate_response(client_or_token, text: str, system_prompt: str) -> {"content": "..."}
+# extract_sentiment_score(text: str) -> Optional[float]
+# get_oauth_token() -> str | client
 from services import (
     get_oauth_token,
     get_news_data,
@@ -41,19 +45,27 @@ DATE_PRESETS = {
 }
 
 POLL_INTERVAL = 60  # seconds
+MAX_ROWS_FOR_LLM = 120
 
 # --- State & logging ---------------------------------------------------------
 def init_state() -> None:
+    # Scope defaults
     st.session_state.setdefault("mode", "Company")                        # "Company" | "Topic" | "Company + Topic"
     st.session_state.setdefault("company_input_mode", "Pick from list")   # "Pick from list" | "Type manually"
     st.session_state.setdefault("company_name", COMPANIES[2]["name"])     # default Alphabet
     st.session_state.setdefault("topic_name", "")
     st.session_state.setdefault("date_preset", "this_week")
 
+    # Filters defaults
+    st.session_state.setdefault("selected_sources", None)                 # list[str] or None
+    st.session_state.setdefault("sentiment_bucket", "All")                # "All" | "Positive" | "Neutral" | "Negative"
+    st.session_state.setdefault("keyword", "")
+
+    # Polling/data
     st.session_state.setdefault("polling", False)
     st.session_state.setdefault("news", None)
 
-    # New-content detection (prevents false positives on rolling windows)
+    # New-content detection (robust to rolling windows)
     st.session_state.setdefault("_latest_ts", None)        # most recent article timestamp (tz-aware)
     st.session_state.setdefault("_latest_ts_count", 0)     # number of rows sharing that timestamp
 
@@ -62,10 +74,10 @@ def init_state() -> None:
     st.session_state.setdefault("summary_text", "")
     st.session_state.setdefault("llm_sentiment", None)
 
-    # Timestamps for UI
-    st.session_state.setdefault("last_update", None)       # shown in Status Panel
+    # UI timestamps
+    st.session_state.setdefault("last_update", None)       # shows in Status Panel
 
-    # Simple JSONL logger
+    # Logger
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     st.session_state.setdefault("_log_file", log_dir / f"polling-{datetime.today():%Y%m%d}.log")
@@ -78,7 +90,7 @@ def log_event(event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         with file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(data, ensure_ascii=False) + "\n")
     except Exception:
-        pass  # don't break the UI for logging
+        pass  # never break UI due to logging
 
 # --- Utilities ---------------------------------------------------------------
 def colour_for_score(score: float) -> str:
@@ -86,7 +98,6 @@ def colour_for_score(score: float) -> str:
     norm = mcolors.Normalize(vmin=-1, vmax=1)
     cmap = mcolors.get_cmap("RdYlGn")
     return mcolors.to_hex(cmap(norm(score)))
-
 
 def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -98,7 +109,6 @@ def _normalise_df(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values("timestamp", ascending=False, na_position="last").reset_index(drop=True)
     return df
 
-
 def _latest_tip(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], int]:
     if df.empty or "timestamp" not in df.columns:
         return None, 0
@@ -106,38 +116,37 @@ def _latest_tip(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], int]:
     latest_count = int((df["timestamp"] == latest_ts).sum())
     return latest_ts, latest_count
 
-
+# --- Data fetch & polling ----------------------------------------------------
 def fetch_and_update_news() -> None:
-    """Fetch, normalise, update state; set summary_stale only when truly newer content arrives."""
+    """Fetch, normalise, update state; mark summary_stale only on truly newer content."""
     mode = st.session_state.mode
     preset_key = st.session_state.date_preset
     preset_val = DATE_PRESETS[preset_key]
 
-    # Fetch
     if mode == "Company":
-        company = (st.session_state.company_name or "").strip()
-        res = get_news_data("COMPANY", company, preset_val)
-        subtitle = f"Company – {company}"
+        subject = (st.session_state.company_name or "").strip()
+        res = get_news_data("COMPANY", subject, preset_val)
+        subtitle = f"Company – {subject}"
 
     elif mode == "Topic":
-        topic = (st.session_state.topic_name or "").strip()
-        res = get_news_data("TOPIC", topic, preset_val)
-        subtitle = f"Topic – {topic}"
+        subject = (st.session_state.topic_name or "").strip()
+        res = get_news_data("TOPIC", subject, preset_val)
+        subtitle = f"Topic – {subject}"
 
     elif mode == "Company + Topic":
         company = (st.session_state.company_name or "").strip()
         topic = (st.session_state.topic_name or "").strip()
-        res = get_news_data("COMPANY_TOPIC", f"{company}|{topic}", preset_val)
+        subject = f"{company}|{topic}"
+        res = get_news_data("COMPANY_TOPIC", subject, preset_val)
         subtitle = f"Company + Topic – {company} / {topic}"
 
     else:
         res = {"res": pd.DataFrame(), "info": {}}
         subtitle = "Invalid mode"
 
-    # Normalise
     df = _normalise_df(res.get("res") if isinstance(res, dict) else pd.DataFrame())
 
-    # Change detection based on latest timestamp (+ tie-count)
+    # New-content detection via latest ts (+ tie count)
     prev_latest = st.session_state.get("_latest_ts")
     prev_count = st.session_state.get("_latest_ts_count", 0)
     latest_ts, latest_count = _latest_tip(df)
@@ -149,7 +158,6 @@ def fetch_and_update_news() -> None:
         elif (latest_ts == prev_latest) and (latest_count > prev_count):
             changed = True
 
-    # Persist and flag
     st.session_state["_latest_ts"] = latest_ts
     st.session_state["_latest_ts_count"] = latest_count
     if changed:
@@ -167,9 +175,8 @@ def fetch_and_update_news() -> None:
         "changed": changed,
     })
 
-
 def maybe_poll() -> None:
-    """Called on every app run. When polling is ON, fetch & note changes."""
+    """On every run, if polling is ON, fetch & note changes."""
     if not st.session_state.polling:
         return
     before = st.session_state.get("_latest_ts")
@@ -181,7 +188,7 @@ def maybe_poll() -> None:
     else:
         log_event("poll_no_change", {"latest": after.isoformat() if after else None})
 
-
+# --- Visuals -----------------------------------------------------------------
 def sentiment_scale(avg: float) -> go.Figure:
     avg = max(-1.0, min(1.0, float(avg)))
     fig = go.Figure()
@@ -196,7 +203,7 @@ def sentiment_scale(avg: float) -> go.Figure:
     )
     return fig
 
-# --- Status panel (compact, with Toggle) -------------------------------------
+# Compact status bar with toggle
 def status_panel():
     st.markdown("#### 🟢 Status Panel")
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
@@ -217,7 +224,7 @@ def status_panel():
         log_event("poll_toggle", {"on": st.session_state.polling})
         st.experimental_rerun()
 
-# --- Top words/topics chart --------------------------------------------------
+# Top words chart
 def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
     if df.empty:
         return None
@@ -226,7 +233,6 @@ def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
 
     text = " ".join(df[col].dropna().astype(str) for col in text_cols if col in df.columns)
     words = re.findall(r"\b\w+\b", text.lower())
-
     stopwords = set([
         "the","and","for","with","this","that","from","are","was","will","have",
         "inc","corp","company","amazon","google","microsoft","apple","said"
@@ -235,7 +241,6 @@ def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
     freq = Counter(words).most_common(top_n)
     if not freq:
         return None
-
     freq_df = pd.DataFrame(freq, columns=["word", "count"])
     fig = px.bar(freq_df.sort_values("count", ascending=True),
                  x="count", y="word", orientation="h",
@@ -246,14 +251,14 @@ def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
 def main() -> None:
     init_state()
 
-    # Conditional auto-rerun (true polling) only when polling ON
+    # True polling only when ON
     if st.session_state.polling:
         st_autorefresh(interval=POLL_INTERVAL * 1000, key="poller")
 
     st.title("Sentiment Analysis")
     st.divider()
 
-    # Poll on each run (does work only when polling ON)
+    # Poll (no-op when OFF)
     maybe_poll()
 
     # Current news (pre-filter)
@@ -261,108 +266,95 @@ def main() -> None:
     df_all = news.get("docs", pd.DataFrame())
     subtitle = news.get("info", {}).get("subtitle", "")
 
-    # --- Compact Status Panel (with Toggle) ---------------------------------
+    # Status bar
     status_panel()
     st.divider()
 
-    # --- Sidebar: Scope (top) + Filters (bottom) ----------------------------
+    # Sidebar: Scope + Filters (use keys, no manual state writes)
     with st.sidebar:
         st.header("Scope")
 
-        # Track changes to invalidate the LLM summary when scope changes
-        current_mode = st.session_state.mode
-        new_mode = st.radio(
-            "Analyse by", ["Company", "Topic", "Company + Topic"],
-            index=["Company", "Topic", "Company + Topic"].index(current_mode),
-        )
-        if new_mode != current_mode:
-            st.session_state.mode = new_mode
-            st.session_state.summary_stale = True  # <- ensure LLM reruns on scope change
+        # snapshot old scope values to detect change → mark summary_stale
+        old_scope = {
+            "mode": st.session_state.mode,
+            "company_input_mode": st.session_state.company_input_mode,
+            "company_name": st.session_state.company_name,
+            "topic_name": st.session_state.topic_name,
+            "date_preset": st.session_state.date_preset,
+        }
+
+        st.radio("Analyse by", ["Company", "Topic", "Company + Topic"], key="mode")
 
         preset_keys = list(DATE_PRESETS.keys())
-        current_preset = st.session_state.date_preset
-        new_preset = st.selectbox(
+        st.selectbox(
             "Date range (UTC)", preset_keys,
-            index=preset_keys.index(current_preset),
+            index=preset_keys.index(st.session_state.date_preset),
+            key="date_preset",
         )
-        if new_preset != current_preset:
-            st.session_state.date_preset = new_preset
-            st.session_state.summary_stale = True  # <- likely to change dataset
 
         if st.session_state.mode in ["Company", "Company + Topic"]:
-            current_company_mode = st.session_state.company_input_mode
-            new_company_mode = st.radio(
-                "Company input", ["Pick from list", "Type manually"],
-                index=0 if current_company_mode == "Pick from list" else 1,
-            )
-            if new_company_mode != current_company_mode:
-                st.session_state.company_input_mode = new_company_mode
-                # (input mode change alone doesn't force LLM unless value changes)
-
+            st.radio("Company input", ["Pick from list", "Type manually"], key="company_input_mode")
             if st.session_state.company_input_mode == "Pick from list":
                 company_names = [c["name"] for c in COMPANIES]
-                current_company = st.session_state.company_name or company_names[0]
-                new_company = st.selectbox(
-                    "Company", company_names,
-                    index=company_names.index(current_company) if current_company in company_names else 0,
-                )
+                idx = company_names.index(st.session_state.company_name) if st.session_state.company_name in company_names else 0
+                st.selectbox("Company", company_names, index=idx, key="company_name")
             else:
-                new_company = st.text_input(
-                    "Company (name or ticker)", value=st.session_state.company_name,
-                )
-
-            if new_company != st.session_state.company_name:
-                st.session_state.company_name = new_company
-                st.session_state.summary_stale = True  # <- ensure LLM reruns when company changes
+                st.text_input("Company (name or ticker)", key="company_name")
 
         if st.session_state.mode in ["Topic", "Company + Topic"]:
-            current_topic = st.session_state.topic_name
-            new_topic = st.text_input("Topic", value=current_topic)
-            if new_topic != current_topic:
-                st.session_state.topic_name = new_topic
-                st.session_state.summary_stale = True  # <- ensure LLM reruns when topic changes
+            st.text_input("Topic", key="topic_name")
 
-        # Fetch button (force rerun so first click renders new data immediately)
+        # Fetch button (first-click render fix with rerun)
         if st.button("🧠 Get Sentiment Analysis", use_container_width=True):
             fetch_and_update_news()
             st.experimental_rerun()
 
-        # Divider between Scope and Filters
+        # Scope→summary change detection
+        if any(st.session_state[k] != old_scope[k] for k in old_scope.keys()):
+            st.session_state.summary_stale = True
+
+        # Divider: Filters
         st.markdown("---")
         st.subheader("Filters")
 
-        # Build filter options from current data (unfiltered)
+        # Build filter options from unfiltered data
         if "source_name" in df_all.columns:
-            sources = sorted(df_all["source_name"].dropna().unique())
-            selected_sources = st.multiselect("Source", options=sources, default=sources)
+            all_sources = sorted(df_all["source_name"].dropna().unique())
+            if st.session_state.selected_sources is None:
+                st.session_state.selected_sources = all_sources[:]  # default = all
+            st.multiselect("Source", options=all_sources,
+                           default=st.session_state.selected_sources, key="selected_sources")
         else:
-            selected_sources = None
+            st.session_state.selected_sources = None
 
-        sentiment_bucket = st.selectbox("Sentiment bucket", ["All", "Positive", "Neutral", "Negative"])
-        keyword = st.text_input("Keyword search in headlines/snippets", "")
+        st.selectbox("Sentiment bucket", ["All", "Positive", "Neutral", "Negative"], key="sentiment_bucket")
+        st.text_input("Keyword search in headlines/snippets", key="keyword")
 
-    # --- Apply filters to produce df ----------------------------------------
+    # Apply filters to produce df
     df = df_all.copy()
 
-    if selected_sources:
-        df = df[df["source_name"].isin(selected_sources)]
+    sel_sources = st.session_state.selected_sources
+    if sel_sources:
+        df = df[df["source_name"].isin(sel_sources)]
 
-    if sentiment_bucket != "All" and "sentiment" in df.columns:
+    bucket = st.session_state.sentiment_bucket
+    if bucket != "All" and "sentiment" in df.columns:
         s = pd.to_numeric(df["sentiment"], errors="coerce")
-        if sentiment_bucket == "Positive":
+        if bucket == "Positive":
             df = df[s > 0.1]
-        elif sentiment_bucket == "Negative":
+        elif bucket == "Negative":
             df = df[s < -0.1]
         else:
             df = df[s.between(-0.1, 0.1)]
 
-    if keyword:
+    kw = st.session_state.keyword
+    if kw:
         mask = pd.Series(False, index=df.index)
         for col in [c for c in df.columns if any(k in c.lower() for k in ["title", "summary", "content"])]:
-            mask |= df[col].astype(str).str.contains(keyword, case=False, na=False)
+            mask |= df[col].astype(str).str.contains(kw, case=False, na=False)
         df = df[mask]
 
-    # --- Display results (filtered df) --------------------------------------
+    # Display results (filtered df)
     if not df.empty:
         st.subheader(subtitle)
 
@@ -413,11 +405,11 @@ def main() -> None:
     else:
         st.info("No news yet. Choose a scope and click **Get Sentiment Analysis**.")
 
-    # --- Executive summary (uses FILTERED df) --------------------------------
+    # Executive summary (uses FILTERED df)
     if not df.empty:
         st.subheader("Executive Summary")
 
-        # Button to refresh LLM summary using current filters
+        # Manual button to refresh LLM using current filters
         refresh_summary = st.button("🔄 Refresh Executive Summary", use_container_width=True)
 
         if st.session_state.summary_stale or refresh_summary:
@@ -425,19 +417,21 @@ def main() -> None:
                 "Summarise the following news items.\n"
                 "End with one line: **Sentiment Score:** <NUMBER between -1 and 1>\n"
             )
-            client = get_oauth_token()  # adapt to what your generate_response expects
+            client = get_oauth_token()
+            # Cap rows to avoid giant prompts
+            df_for_llm = df.sort_values("timestamp", ascending=False).head(MAX_ROWS_FOR_LLM) if "timestamp" in df.columns else df.head(MAX_ROWS_FOR_LLM)
             with st.spinner("Summarising..."):
-                resp = generate_response(client, df.to_json(orient="records"), prompt)
+                resp = generate_response(client, df_for_llm.to_json(orient="records"), prompt)
                 content = resp.get("content", "")
                 score = extract_sentiment_score(content)
                 st.session_state.summary_text = content
                 st.session_state.llm_sentiment = float(score) if score is not None else None
                 st.session_state.summary_stale = False
-                # If you want Last refresh to reflect summary-only refreshes too:
+                # If you want "Last refresh" to reflect summary-only refreshes too, keep next line:
                 st.session_state.last_update = datetime.utcnow()
             log_event("summary_generated", {
                 "latest_ts": st.session_state["_latest_ts"].isoformat() if st.session_state["_latest_ts"] else None,
-                "filtered_rows": int(len(df)),
+                "filtered_rows": int(len(df_for_llm)),
             })
 
         if st.session_state.llm_sentiment is not None:
