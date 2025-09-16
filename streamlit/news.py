@@ -6,11 +6,13 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import matplotlib.colors as mcolors
 import streamlit as st
+from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
 # --- External helpers (implement in services.py) -----------------------------
@@ -46,6 +48,23 @@ DATE_PRESETS = {
 
 POLL_INTERVAL = 60  # seconds
 MAX_ROWS_FOR_LLM = 120
+
+# ---- Price/Predictions config (yours, kept verbatim where it matters) -------
+PRICE_CFG = {
+    "use_sample": True,          # Set False to show file uploaders (or replace with real API)
+    "default_horizon": 5,        # e.g., 5/10/15
+    "show_class_markers": True,
+    "show_up_init": True,
+    "show_down_init": True,
+    "show_flat_init": False,
+    "marker_size": 9,
+    "marker_opacity": 0.85,
+    "bps_bar_width_min": 2,
+    "show_volume": True,
+    "vol_axis_range_multiplier": 4.0,
+    "vol_opacity": 0.35,
+    "vol_bar_width_min": 1,
+}
 
 # --- State & logging ---------------------------------------------------------
 def init_state() -> None:
@@ -247,6 +266,186 @@ def plot_top_words(df: pd.DataFrame, text_cols: list[str], top_n: int = 15):
                  title="Top Words in Headlines/Summaries")
     return fig
 
+# === PRICE / PREDICTIONS helpers (from your snippet, modularised) =============
+def make_sample_price(start=None, minutes=390, seed=42):
+    rng = np.random.default_rng(seed)
+    if start is None:
+        start = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    ts = pd.date_range(start=start, periods=minutes, freq="1min")
+    rets = rng.normal(0, 0.0008, size=minutes)
+    price = 100 * (1 + rets).cumprod()
+    base = rng.lognormal(mean=9.2, sigma=0.5, size=minutes)
+    minute = np.arange(minutes)
+    u_shape = 0.7 + 0.6 * (np.cos((minute / minutes) * 2 * np.pi) * -1)
+    vol = (base * u_shape).astype(int)
+    return pd.DataFrame({"timestamp": ts, "price": price, "volume": vol})
+
+def make_sample_preds(price_df: pd.DataFrame, horizons=(5,10,15), seed=43):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for t in price_df["timestamp"]:
+        for h in horizons:
+            cls = rng.choice(["Up", "Down", "Flat"], p=[0.35, 0.35, 0.30])
+            conf = rng.uniform(0.55, 0.95)
+            pred_bps = rng.normal(0, 6)
+            rows.append({"timestamp": t, "horizon_min": h, "class": cls, "confidence": conf, "pred_bps": pred_bps})
+    return pd.DataFrame(rows)
+
+def ensure_ts(df: pd.DataFrame, col="timestamp") -> pd.DataFrame:
+    if not np.issubdtype(df[col].dtype, np.datetime64):
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df.dropna(subset=[col])
+
+def build_price_pred_fig(df_price: pd.DataFrame, df_pred: pd.DataFrame, cfg: Dict[str, Any]) -> go.Figure:
+    df_price = ensure_ts(df_price, "timestamp").sort_values("timestamp")
+    for col in ["price", "volume"]:
+        if col not in df_price.columns:
+            raise ValueError("Price data must include 'price' and 'volume' columns (1-minute binned).")
+
+    df_pred = ensure_ts(df_pred, "timestamp").sort_values("timestamp")
+    needed = {"horizon_min", "class", "pred_bps"}
+    missing = needed - set(df_pred.columns)
+    if missing:
+        raise ValueError(f"Predictions data missing columns: {missing}. Required: timestamp, horizon_min, class, pred_bps[, confidence].")
+
+    # Compute END time & realised END price
+    df_pred["end_time"] = df_pred["timestamp"] + pd.to_timedelta(df_pred["horizon_min"], unit="m")
+    df_price_end = df_price.rename(columns={"timestamp": "end_time", "price": "end_price"})
+    df_pred = df_pred.merge(df_price_end[["end_time", "end_price"]], on="end_time", how="left").dropna(subset=["end_price"])
+
+    # Horizon picker
+    available_horizons = sorted(df_pred["horizon_min"].dropna().unique().tolist())
+    default_idx = available_horizons.index(cfg["default_horizon"]) if cfg["default_horizon"] in available_horizons else 0
+    selected_h = st.selectbox("Prediction horizon (minutes):", available_horizons, index=default_idx, key="horizon_select")
+
+    dfh = df_pred[df_pred["horizon_min"] == selected_h].copy()
+    dfh["class"] = dfh["class"].astype(str).str.capitalize()
+
+    # Figure scaffold
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.68, 0.32], vertical_spacing=0.06,
+        specs=[[{"secondary_y": True}], [{}]]
+    )
+
+    # Top: Price line
+    fig.add_trace(
+        go.Scatter(
+            x=df_price["timestamp"], y=df_price["price"],
+            mode="lines", name="Trade Price",
+            hovertemplate="Time: %{x}<br>Price: %{y:.4f}<extra></extra>"
+        ),
+        row=1, col=1, secondary_y=False
+    )
+
+    # Top: Volume (secondary axis)
+    if cfg["show_volume"]:
+        vol95 = float(np.nanpercentile(df_price["volume"], 95))
+        vol_axis_max = vol95 * cfg["vol_axis_range_multiplier"]
+        fig.add_trace(
+            go.Bar(
+                x=df_price["timestamp"], y=df_price["volume"],
+                name="Volume (1m)",
+                width=int(cfg["vol_bar_width_min"] * 60 * 1000),
+                opacity=cfg["vol_opacity"], marker_line_width=0,
+                hovertemplate="Time: %{x}<br>Volume: %{y:,}<extra></extra>",
+            ),
+            row=1, col=1, secondary_y=True
+        )
+        fig.update_yaxes(
+            title_text="", showgrid=False, showticklabels=False, zeroline=False,
+            range=[0, max(vol_axis_max, df_price["volume"].max() * 1.05)],
+            secondary_y=True, row=1, col=1
+        )
+
+    # Top: Classification markers
+    if cfg["show_class_markers"] and not dfh.empty:
+        class_to_symbol = {"Up": "triangle-up", "Down": "triangle-down", "Flat": "circle"}
+        class_init_vis = {"Up": cfg["show_up_init"], "Down": cfg["show_down_init"], "Flat": cfg["show_flat_init"]}
+        for cls in ["Up", "Down", "Flat"]:
+            dfg = dfh[dfh["class"] == cls]
+            if dfg.empty:
+                continue
+            init_visible = True if class_init_vis.get(cls, True) else "legendonly"
+            if "confidence" in dfg.columns:
+                custom = np.stack([dfg["timestamp"].dt.strftime("%Y-%m-%d %H:%M"), dfg["confidence"]], axis=1)
+                hover = (
+                    "END Time: %{x}<br>END Price: %{y:.4f}"
+                    f"<br>Pred Time: %{{customdata[0]}}<br>Horizon: {selected_h}m<br>Class: {cls}"
+                    "<br>Confidence: %{{customdata[1]:.0%}}<extra></extra>"
+                )
+            else:
+                custom = np.stack([dfg["timestamp"].dt.strftime("%Y-%m-%d %H:%M")], axis=1)
+                hover = (
+                    "END Time: %{x}<br>END Price: %{y:.4f}"
+                    f"<br>Pred Time: %{{customdata[0]}}<br>Horizon: {selected_h}m<br>Class: {cls}<extra></extra>"
+                )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=dfg["end_time"], y=dfg["end_price"], mode="markers",
+                    name=f"{selected_h}m {cls}",
+                    marker=dict(size=cfg["marker_size"], symbol=class_to_symbol[cls]),
+                    opacity=cfg["marker_opacity"], hovertemplate=hover, customdata=custom,
+                    visible=init_visible, legendgroup=f"{selected_h}m {cls}",
+                ),
+                row=1, col=1, secondary_y=False
+            )
+
+    # Bottom: Δbps bars
+    if not dfh.empty:
+        colours = np.where(dfh["pred_bps"] > 0, "green", np.where(dfh["pred_bps"] < 0, "red", "grey"))
+        fig.add_trace(
+            go.Bar(
+                x=dfh["end_time"], y=dfh["pred_bps"],
+                name=f"{selected_h}m Δbps (pred)",
+                width=int(cfg["bps_bar_width_min"] * 60 * 1000),
+                marker_color=colours, opacity=0.9,
+                hovertemplate=("END Time: %{x}<br>Predicted Δ: %{y:.2f} bps"
+                               f"<br>Horizon: {selected_h}m"
+                               + ("<br>Confidence: %{{customdata[0]:.0%}}" if "confidence" in dfh.columns else "")
+                               + "<extra></extra>"),
+                customdata=dfh[["confidence"]] if "confidence" in dfh.columns else None,
+            ),
+            row=2, col=1
+        )
+
+    # Layout polish
+    fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Predicted Δ (bps)", row=2, col=1, zeroline=True, zerolinewidth=1)
+    fig.update_layout(
+        height=840, margin=dict(l=10, r=10, t=32, b=10),
+        hovermode="x unified", barmode="overlay",
+        xaxis=dict(rangeslider=dict(visible=False)),
+        xaxis2=dict(rangeslider=dict(visible=False)),
+    )
+    fig.update_xaxes(matches='x', row=1, col=1, showspikes=True, spikemode="across")
+    fig.update_xaxes(matches='x', row=2, col=1, showspikes=True, spikemode="across")
+    return fig
+
+def load_price_and_preds(company_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Replace this with your real data hookups when ready.
+    For now:
+      - if PRICE_CFG['use_sample'] is True -> generate synthetic intraday + preds
+      - else -> show uploaders in the sidebar to load CSVs
+    Expected schemas:
+      Price: timestamp, price, volume   (1-minute rows)
+      Preds: timestamp(pred time), horizon_min, class, pred_bps[, confidence]
+    """
+    if PRICE_CFG["use_sample"]:
+        df_price = make_sample_price()
+        df_pred = make_sample_preds(df_price)
+        return df_price, df_pred
+    else:
+        st.info("Upload Price & Predictions CSVs for the selected company.")
+        price_file = st.sidebar.file_uploader("Price CSV (timestamp, price, volume)", type=["csv"], key="price_csv")
+        preds_file = st.sidebar.file_uploader("Predictions CSV (timestamp, horizon_min, class, pred_bps[, confidence])", type=["csv"], key="preds_csv")
+        if not price_file or not preds_file:
+            st.warning("Upload both files to render the chart.")
+            return pd.DataFrame(), pd.DataFrame()
+        return pd.read_csv(price_file), pd.read_csv(preds_file)
+
 # --- App ---------------------------------------------------------------------
 def main() -> None:
     init_state()
@@ -258,23 +457,19 @@ def main() -> None:
     st.title("Sentiment Analysis")
     st.divider()
 
-    # Poll (no-op when OFF)
     maybe_poll()
 
-    # Current news (pre-filter)
     news = st.session_state.news or {}
     df_all = news.get("docs", pd.DataFrame())
     subtitle = news.get("info", {}).get("subtitle", "")
 
-    # Status bar
     status_panel()
     st.divider()
 
-    # Sidebar: Scope + Filters (use keys, no manual state writes)
+    # Sidebar: Scope + Filters (key-based)
     with st.sidebar:
         st.header("Scope")
 
-        # snapshot old scope values to detect change → mark summary_stale
         old_scope = {
             "mode": st.session_state.mode,
             "company_input_mode": st.session_state.company_input_mode,
@@ -304,20 +499,16 @@ def main() -> None:
         if st.session_state.mode in ["Topic", "Company + Topic"]:
             st.text_input("Topic", key="topic_name")
 
-        # Fetch button (first-click render fix with rerun)
         if st.button("🧠 Get Sentiment Analysis", use_container_width=True):
             fetch_and_update_news()
             st.experimental_rerun()
 
-        # Scope→summary change detection
         if any(st.session_state[k] != old_scope[k] for k in old_scope.keys()):
             st.session_state.summary_stale = True
 
-        # Divider: Filters
         st.markdown("---")
         st.subheader("Filters")
 
-        # Build filter options from unfiltered data
         if "source_name" in df_all.columns:
             all_sources = sorted(df_all["source_name"].dropna().unique())
             if st.session_state.selected_sources is None:
@@ -330,13 +521,11 @@ def main() -> None:
         st.selectbox("Sentiment bucket", ["All", "Positive", "Neutral", "Negative"], key="sentiment_bucket")
         st.text_input("Keyword search in headlines/snippets", key="keyword")
 
-    # Apply filters to produce df
+    # Apply filters
     df = df_all.copy()
-
     sel_sources = st.session_state.selected_sources
     if sel_sources:
         df = df[df["source_name"].isin(sel_sources)]
-
     bucket = st.session_state.sentiment_bucket
     if bucket != "All" and "sentiment" in df.columns:
         s = pd.to_numeric(df["sentiment"], errors="coerce")
@@ -346,7 +535,6 @@ def main() -> None:
             df = df[s < -0.1]
         else:
             df = df[s.between(-0.1, 0.1)]
-
     kw = st.session_state.keyword
     if kw:
         mask = pd.Series(False, index=df.index)
@@ -354,7 +542,7 @@ def main() -> None:
             mask |= df[col].astype(str).str.contains(kw, case=False, na=False)
         df = df[mask]
 
-    # Display results (filtered df)
+    # Results
     if not df.empty:
         st.subheader(subtitle)
 
@@ -382,7 +570,6 @@ def main() -> None:
             fig.add_hline(y=0, line_color="gray", opacity=0.6)
             st.plotly_chart(fig, use_container_width=True)
 
-        # Table (sentiment styled: bold + 2dp + fixed gradient)
         cfg = {}
         if "url" in df.columns:
             cfg["url"] = st.column_config.LinkColumn(display_text="Link")
@@ -398,18 +585,15 @@ def main() -> None:
         else:
             st.dataframe(df, use_container_width=True, hide_index=True, column_config=cfg)
 
-        # Top words chart
         fig_words = plot_top_words(df, ["title", "summary"])
         if fig_words:
             st.plotly_chart(fig_words, use_container_width=True)
     else:
         st.info("No news yet. Choose a scope and click **Get Sentiment Analysis**.")
 
-    # Executive summary (uses FILTERED df)
+    # --- Executive summary (filtered df) -------------------------------------
     if not df.empty:
         st.subheader("Executive Summary")
-
-        # Manual button to refresh LLM using current filters
         refresh_summary = st.button("🔄 Refresh Executive Summary", use_container_width=True)
 
         if st.session_state.summary_stale or refresh_summary:
@@ -418,7 +602,6 @@ def main() -> None:
                 "End with one line: **Sentiment Score:** <NUMBER between -1 and 1>\n"
             )
             client = get_oauth_token()
-            # Cap rows to avoid giant prompts
             df_for_llm = df.sort_values("timestamp", ascending=False).head(MAX_ROWS_FOR_LLM) if "timestamp" in df.columns else df.head(MAX_ROWS_FOR_LLM)
             with st.spinner("Summarising..."):
                 resp = generate_response(client, df_for_llm.to_json(orient="records"), prompt)
@@ -427,7 +610,6 @@ def main() -> None:
                 st.session_state.summary_text = content
                 st.session_state.llm_sentiment = float(score) if score is not None else None
                 st.session_state.summary_stale = False
-                # If you want "Last refresh" to reflect summary-only refreshes too, keep next line:
                 st.session_state.last_update = datetime.utcnow()
             log_event("summary_generated", {
                 "latest_ts": st.session_state["_latest_ts"].isoformat() if st.session_state["_latest_ts"] else None,
@@ -437,6 +619,31 @@ def main() -> None:
         if st.session_state.llm_sentiment is not None:
             st.metric("LLM Sentiment", f"{st.session_state.llm_sentiment:.2f}")
         st.markdown(st.session_state.summary_text)
+
+    # === ───────────────────────── Price / Volume / Predictions section ─────────────────────────
+    if st.session_state.mode in ["Company", "Company + Topic"]:
+        company_for_prices = st.session_state.company_name or "Selected Company"
+        with st.expander(f"📈 Price, Volume & Predicted Δbps — {company_for_prices}", expanded=False):
+            # In future: replace load_price_and_preds() with real API calls keyed by ticker/company
+            df_price, df_pred = load_price_and_preds(company_for_prices)
+            if not df_price.empty and not df_pred.empty:
+                try:
+                    fig_p = build_price_pred_fig(df_price, df_pred, PRICE_CFG)
+                    st.plotly_chart(fig_p, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Failed to render price/predictions chart: {e}")
+            else:
+                st.info("Provide price & predictions data (using sample mode or CSV uploaders) to show this chart.")
+            # Optional: small notes / schema reminder
+            with st.expander("Data format & behaviour", expanded=False):
+                st.markdown("""
+**Price CSV**: `timestamp`, `price`, `volume` (1-minute binned)  
+**Predictions CSV**: `timestamp` (prediction time), `horizon_min` (int), `class` (Up/Down/Flat), `pred_bps` (float), optional `confidence`.
+
+- Volume is drawn on the **secondary Y-axis** of the **top chart** as subtle bars.  
+- Use the legend to show/hide **Up/Down/Flat** markers (Flat hidden by default).  
+- Bottom panel shows **predicted Δ (bps)** for selected horizon.  
+""")
 
     st.caption("© MAAS Execution Analytics")
 
