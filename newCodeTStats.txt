@@ -1,0 +1,34 @@
+import numpy as np
+import pandas as pd
+from scipy import stats
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Example dummy data
+np.random.seed(42)
+df = pd.DataFrame({
+    'Symbol': np.repeat(['A','B','C','D'], 100),
+    'SpreadPre': np.concatenate([
+        np.random.normal(5, 0.3, 100),
+        np.random.normal(10, 1, 100),
+        np.random.normal(20, 2, 100),
+        np.random.normal(50, 5, 100)
+    ])
+})
+df['SpreadPost'] = df['SpreadPre'] * (1 + np.random.normal(0.05, 0.02, len(df)))  # ~5% widening
+df['PctChange'] = (df['SpreadPost'] - df['SpreadPre']) / df['SpreadPre']
+df['LogChange'] = np.log(df['SpreadPost'] / df['SpreadPre'])
+
+# Symbol-level average % change
+symbol_means = df.groupby('Symbol')['PctChange'].mean()
+
+# Test if average change (across symbols) differs from zero
+t_stat, p_val = stats.ttest_1samp(symbol_means, 0)
+print(f"Mean Δ% = {symbol_means.mean()*100:.2f}%,  t={t_stat:.2f},  p={p_val:.4f}")
+
+# Plot
+sns.barplot(x=symbol_means.index, y=symbol_means.values*100, color='skyblue')
+plt.axhline(0, color='red', linestyle='--')
+plt.title("Average Spread Change per Symbol (%)")
+plt.ylabel("Mean % Change (Post vs Pre)")
+plt.show()
