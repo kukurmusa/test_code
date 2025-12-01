@@ -1,223 +1,187 @@
-from qpython import qconnection
-from qpython.qtype import QException
 import numpy as np
-import gurobipy as gp
+import pandas as prd
+# import cvxpy as cp        # <-- no longer used
+import gurobipy as gp       # <-- new: use gurobipy instead
 from gurobipy import GRB
+import math
+
+# -----------------------------------------------------------
+# Data prep (unchanged from your structure – just as example)
+# -----------------------------------------------------------
+portfolio_notional = query_kdb("nsjdlpatca002", 55555, "exec sum Notional from data")
+
+B_b = np.stack(np.array(query_kdb("nsjdlpatca002", 55555, "barraRefDict[`barraExp]")))
+B_h = np.stack(np.array(query_kdb("nsjdlpatca002", 55555, "etfBasketRefDict[`barraExp]")))
+specVar = np.array(query_kdb("nsjdlpatca002", 55555, "barraRefDict[`barraSpec]"))
+w_b = np.stack(np.array(query_kdb("nsjdlpatca002", 55555, "barraRefDict[`barraWts]")), dtype=np.float64)
+Cov_F = np.array(query_kdb("nsjdlpatca002", 55555, "barraRefDict[`barraCov]"))
+adv   = np.array(query_kdb("nsjdlpatca002", 55555, "etfBasket[`advDol]"))
+
+# Make covariance symmetric + add small ridge (unchanged)
+Cov_F = (Cov_F + Cov_F.T) / 2
+eps = 1e-2
+Cov_F += np.eye(Cov_F.shape[0]) * eps
+
+m_futures = B_h.shape[1]     # number of hedge instruments
+M = 1.0                      # big-M used in |w_h| <= M * z
+
+# NOTE: cvxpy variables removed – Gurobi will create its own vars
+# w_h = cp.Variable(m_futures)
+# z   = cp.Variable(m_futures, boolean=True)
+
+# Pre-compute baseline exposure from portfolio only
+# (this is used both before & after hedge inside the function)
+exposure_base = B_b.T @ w_b
+
+# Keep the same inputDict structure as before so callers don’t break
+inputDict = dict()
+inputDict["B_b"] = B_b
+inputDict["B_h"] = B_h
+inputDict["specVar"] = specVar
+inputDict["w_b"] = w_b
+inputDict["Cov_F"] = Cov_F
+inputDict["adv"] = adv
+inputDict["portfolio_notional"] = portfolio_notional
+inputDict["m_futures"] = m_futures
+inputDict["M"] = M
+inputDict["adv_cap"] = 1.0   # 100% of ADV as global cap (same as before)
 
 
-# =========================================================
-# 1. Simple continuous hedge: solveHedgeMinWeight via Gurobi
-#    Minimise (b_p - X_f^T h)' F (b_p - X_f^T h)
-#    s.t. h_i >= 0.10, sum h_i = 1
-# =========================================================
-def solveHedgeMinWeight(hedgeInput):
+# -----------------------------------------------------------
+# Gurobi implementation of the optimisation
+# -----------------------------------------------------------
+def calculate_optimal_hedge(inputDict):
     """
-    Gurobi-only version of the simple continuous hedge problem.
-
-    hedgeInput: q dict with keys `b_p`, `X_f`, `F` mapped to:
-      - b_p : portfolio factor exposure vector (K,)
-      - X_f : futures factor exposures (M x K)
-      - F   : factor covariance matrix (K x K)
-    """
-
-    try:
-        # Extract input from q dict (keys are bytes from qpython)
-        b_p = np.array(hedgeInput[b"b_p"]).flatten()     # (K,)
-        X_f = np.array(hedgeInput[b"X_f"])               # (M, K)
-        F   = np.array(hedgeInput[b"F"])                 # (K, K)
-
-        K = b_p.shape[0]
-        M = X_f.shape[0]
-
-        # Regularise / symmetrise covariance
-        F = 0.5 * (F + F.T)
-        F = F + np.eye(K) * 1e-8
-
-        # We'll write the objective as:
-        #   minimise (b_p - X_f^T h)' F (b_p - X_f^T h)
-        # Let X_T = X_f.T
-        X_T = X_f.T  # (K, M)
-
-        # Expand objective: || F^(1/2) (b_p - X_T h) ||^2
-        # More directly: y = b_p - X_T h
-        # objective = y' F y = (b_p - X_T h)' F (b_p - X_T h)
-        # In standard QP form: 0.5 h' Q h + c' h + const
-        # Derivation:
-        #   = h' (X_T' F X_T) h - 2 b_p' F X_T h + b_p' F b_p
-        # So:
-        #   Q = 2 * X_T' F X_T
-        #   c = -2 * X_T' F b_p
-
-        Q = 2.0 * (X_T.T @ F @ X_T)        # (M, M)
-        c = -2.0 * (X_T.T @ F @ b_p)       # (M,)
-
-        # Build Gurobi model
-        model = gp.Model("solveHedgeMinWeight")
-        model.Params.OutputFlag = 0  # set to 1 for debug
-
-        # Variables: h_i, no upper bounds (only via constraints)
-        h = model.addVars(M, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="h")
-
-        # Constraints: h_i >= 0.10, sum h_i = 1
-        for i in range(M):
-            model.addConstr(h[i] >= 0.10, name=f"min_weight_{i}")
-
-        model.addConstr(gp.quicksum(h[i] for i in range(M)) == 1.0, name="sum_to_one")
-
-        # Objective: 0.5 h' Q h + c' h
-        obj = gp.QuadExpr()
-
-        # Quadratic part
-        for i in range(M):
-            for j in range(M):
-                if Q[i, j] != 0.0:
-                    obj += 0.5 * Q[i, j] * h[i] * h[j]
-
-        # Linear part
-        for i in range(M):
-            if c[i] != 0.0:
-                obj += c[i] * h[i]
-
-        model.setObjective(obj, GRB.MINIMIZE)
-
-        # Solve
-        model.optimize()
-
-        if model.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-            return f"Error: Gurobi status {model.Status}"
-
-        # Extract solution
-        h_opt = [h[i].X for i in range(M)]
-
-        # Return hedge weights to q (as simple list)
-        return h_opt
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
-# =========================================================
-# 2. MIQP version (with binaries z) in Gurobi only
-#    – equivalent to your second cvxpy example
-# =========================================================
-def solveHedgeMIQP(b_p, X_f, F, max_futs=5, big_M=1.0):
-    """
-    Gurobi-only version of the MIQP hedge:
-
-    Minimise (b_p - X_f^T h)' F (b_p - X_f^T h)
-    s.t. -M z_i <= h_i <= M z_i
-         sum z_i <= max_futs
-         sum |h_i| >= 0.2   (linearised)
-         sum h_i == 0
+    Solve the same hedge optimisation problem using gurobipy
+    instead of CVXPY/ECOS_BB. Structure of the function and 
+    return values is kept the same.
     """
 
-    b_p = np.asarray(b_p).flatten()         # (K,)
-    X_f = np.asarray(X_f)                   # (M, K)
-    F   = np.asarray(F)                     # (K, K)
+    # -----------------------------
+    # Unpack data / scalar limits
+    # -----------------------------
+    B_b = inputDict["B_b"]
+    B_h = inputDict["B_h"]
+    w_b = inputDict["w_b"]
+    Cov_F = inputDict["Cov_F"]
+    adv = inputDict["adv"]
+    portfolio_notional = inputDict["portfolio_notional"]
+    m_futures = inputDict["m_futures"]
+    M = inputDict["M"]
 
-    K = b_p.shape[0]
-    M = X_f.shape[0]
+    # Per-instrument max weight from ADV cap (same logic as before)
+    max_allowed_weight = np.minimum(
+        M,
+        inputDict["adv_cap"] * adv / portfolio_notional
+    )
+    max_leverage = 100.0   # L1-norm cap on hedge weights
+    min_weight = 0.30      # currently unused but kept for structure
 
-    # Regularise / symmetrise covariance
-    F = 0.5 * (F + F.T)
-    F = F + np.eye(K) * 1e-8
+    n_factors = Cov_F.shape[0]
 
-    X_T = X_f.T  # (K, M)
+    # -------------------------------------------------------
+    # Build Gurobi model
+    # -------------------------------------------------------
+    model = gp.Model("optimal_hedge")
 
-    # Quadratic form in h:
-    # same derivation as above
-    Q = 2.0 * (X_T.T @ F @ X_T)        # (M, M)
-    c = -2.0 * (X_T.T @ F @ b_p)       # (M,)
+    # Continuous hedge weights w_h[j] for each future
+    w_h = model.addVars(m_futures, lb=-GRB.INFINITY, name="w_h")
 
-    model = gp.Model("HedgeMIQP")
-    model.Params.OutputFlag = 1
+    # Binary selection variables z[j] to control which futures are used
+    z = model.addVars(m_futures, vtype=GRB.BINARY, name="z")
 
-    # Variables
-    h = model.addVars(M, lb=-GRB.INFINITY, ub=GRB.INFINITY, name="h")
-    z = model.addVars(M, vtype=GRB.BINARY, name="z")
-    # auxiliary for |h_i|
-    a = model.addVars(M, lb=0.0, name="a")
+    # Auxiliary variables u[j] ≈ |w_h[j]|  (for L1-norm & big-M constraints)
+    u = model.addVars(m_futures, lb=0.0, name="u")
 
-    # Constraints:
-    for i in range(M):
-        # -M z_i <= h_i <= M z_i
-        model.addConstr(h[i] <=  big_M * z[i], name=f"ub_{i}")
-        model.addConstr(h[i] >= -big_M * z[i], name=f"lb_{i}")
+    # Factor exposure variables e[k] for net exposure after hedge
+    e = model.addVars(n_factors, lb=-GRB.INFINITY, name="e")
 
-        # a_i >= |h_i|
-        model.addConstr(a[i] >=  h[i], name=f"a_pos_{i}")
-        model.addConstr(a[i] >= -h[i], name=f"a_neg_{i}")
+    # -------------------------------------------------------
+    # Constraints (mirror CVXPY ones)
+    # -------------------------------------------------------
 
-    # sum z_i <= max_futs
-    model.addConstr(gp.quicksum(z[i] for i in range(M)) <= max_futs, name="max_futures")
+    # 1) Tie e[k] to base exposure + futures contribution
+    #    e = B_b^T w_b + B_h^T w_h
+    for k in range(n_factors):
+        model.addConstr(
+            e[k] == exposure_base[k] + gp.quicksum(B_h[k, j] * w_h[j] for j in range(m_futures)),
+            name=f"exposure_{k}"
+        )
 
-    # sum |h_i| >= 0.2   ->   sum a_i >= 0.2
-    model.addConstr(gp.quicksum(a[i] for i in range(M)) >= 0.2, name="min_activity")
+    # 2) u[j] >= |w_h[j]|  (absolute value linearisation)
+    for j in range(m_futures):
+        model.addConstr(u[j] >=  w_h[j],   name=f"abs_pos_{j}")
+        model.addConstr(u[j] >= -w_h[j],   name=f"abs_neg_{j}")
 
-    # dollar-neutral: sum h_i == 0
-    model.addConstr(gp.quicksum(h[i] for i in range(M)) == 0.0, name="dollar_neutral")
+    # 3) |w_h| <= M * z  (big-M linking hedge size to binary indicator)
+    for j in range(m_futures):
+        model.addConstr(u[j] <= M * z[j], name=f"bigM_{j}")
 
-    # Objective: 0.5 h' Q h + c' h
-    obj = gp.QuadExpr()
-    for i in range(M):
-        for j in range(M):
-            if Q[i, j] != 0.0:
-                obj += 0.5 * Q[i, j] * h[i] * h[j]
+    # 4) Optional tighter instrument-specific ADV caps
+    #    (same structure as your commented CVXPY code)
+    for j in range(m_futures):
+        model.addConstr(u[j] <= max_allowed_weight[j] * z[j],
+                        name=f"adv_cap_{j}")
 
-    for i in range(M):
-        if c[i] != 0.0:
-            obj += c[i] * h[i]
+    # 5) Sum of selected futures <= 2  (cardinality constraint)
+    model.addConstr(gp.quicksum(z[j] for j in range(m_futures)) <= 2,
+                    name="max_2_instruments")
 
-    model.setObjective(obj, GRB.MINIMIZE)
+    # 6) L1-norm of hedge weights <= max_leverage
+    model.addConstr(gp.quicksum(u[j] for j in range(m_futures)) <= max_leverage,
+                    name="leverage_cap")
+
+    # -------------------------------------------------------
+    # Objective: minimise net factor risk
+    #   risk = e^T Cov_F e
+    # -------------------------------------------------------
+    quad_expr = gp.QuadExpr()
+    for i in range(n_factors):
+        for j in range(n_factors):
+            if Cov_F[i, j] != 0.0:
+                quad_expr.add(e[i] * Cov_F[i, j] * e[j])
+
+    model.setObjective(quad_expr, GRB.MINIMIZE)
+
+    # Speed-up options (tune as needed)
+    model.Params.OutputFlag = 0       # silent optimisation
+    model.Params.MIPGap = 1e-4
+    model.Params.TimeLimit = 60       # seconds, just as a safety cap
+
+    # -------------------------------------------------------
+    # Solve
+    # -------------------------------------------------------
     model.optimize()
 
+    print("Feasible solution found?", model.Status == GRB.OPTIMAL)
+
+    # -------------------------------------------------------
+    # Risk before hedge  (unchanged calculation)
+    # -------------------------------------------------------
+    exposure_before = exposure_base
+    risk_before = exposure_before.T @ Cov_F @ exposure_before
+    risk_before = math.sqrt(risk_before / 250.0)
+    print(f"Risk Before: {risk_before}")
+
+    # Handle infeasible / non-optimal cases similar to CVXPY check
     if model.Status not in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-        raise RuntimeError(f"Gurobi status: {model.Status}")
+        return (inputDict["adv_cap"], risk_before, None)
 
-    h_opt = np.array([h[i].X for i in range(M)])
-    z_opt = np.array([z[i].X for i in range(M)])
+    # -------------------------------------------------------
+    # Extract hedge weights from solution
+    # -------------------------------------------------------
+    w_h_sol = np.array([w_h[j].X for j in range(m_futures)])
 
-    return h_opt, z_opt, model.ObjVal
+    # -------------------------------------------------------
+    # Risk after hedge  (same formula as before)
+    # -------------------------------------------------------
+    exposure_after = exposure_before + B_h.T @ w_h_sol
+    risk_after = exposure_after.T @ Cov_F @ exposure_after
+    risk_after = math.sqrt(risk_after / 250.0)
+    print(f"Risk After: {risk_after}")
 
-
-# =========================================================
-# 3. q IPC server – unchanged, now using Gurobi backend
-# =========================================================
-def run_server():
-    with qconnection.QConnection(host="localhost", port=5001) as q:
-        print("Connected to q. Awaiting requests...")
-        while True:
-            try:
-                data = q.receive(data_only=False)
-                fn, args = data
-                if fn == b"solveHedgeMinWeight":
-                    result = solveHedgeMinWeight(args)
-                    q.send(result)
-                else:
-                    q.send(f"Unknown function: {fn}")
-            except QException as e:
-                print(f"QException: {e}")
-            except Exception as e:
-                print(f"Error: {e}")
+    return (inputDict["adv_cap"], risk_before, risk_after, w_h_sol)
 
 
-# =========================================================
-# 4. Standalone test for the MIQP version (optional)
-# =========================================================
-if __name__ == "__main__":
-    # If you want to test the MIQP bit directly in Python:
-    b_p = np.array([0.6, 0.8, 0.3])
-    X_f = np.random.randn(8, 3) * 0.5 + 0.1
-    F = np.array([
-        [0.04, 0.01, 0.00],
-        [0.01, 0.03, 0.01],
-        [0.00, 0.01, 0.05],
-    ])
-
-    h_opt, z_opt, obj = solveHedgeMIQP(b_p, X_f, F, max_futs=5, big_M=1.0)
-    print("MIQP objective:", obj)
-    print("Selected weights:", np.round(h_opt, 4))
-    print("Used futures:", np.where(np.abs(h_opt) > 1e-4)[0])
-
-    # Or start the q server instead:
-    # run_server()
+# Run optimisation
+calculate_optimal_hedge(inputDict)
