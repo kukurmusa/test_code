@@ -53,26 +53,28 @@ inputDict["adv_cap"] = 1.0   # 100% of ADV as global cap (same as before)
 def calculate_optimal_hedge(inputDict):
     """
     Solve the hedge optimisation problem using gurobipy instead of CVXPY.
-    The overall structure, inputs and outputs are kept the same.
+    Overall structure, inputs and outputs are kept the same.
     """
 
     # -----------------------------
     # Unpack inputs
     # -----------------------------
-    B_b = inputDict["B_b"]               # factor exposures of portfolio (K × N)
-    B_h = inputDict["B_h"]               # factor exposures of futures/ETFs (K × M)
+    B_b = inputDict["B_b"]               # portfolio factor exposures (N × K)
+    B_h = inputDict["B_h"]               # hedge instrument exposures (M × K)
     w_b = inputDict["w_b"]               # portfolio weights (N,)
-    Cov_F = inputDict["Cov_F"]           # factor covariance matrix (K × K)
-    adv = inputDict["adv"]               # ADV in notional for each hedge instrument (M,)
+    Cov_F = inputDict["Cov_F"]           # factor covariance (K × K)
+    adv = inputDict["adv"]               # ADV per hedge instrument (length <= M)
     portfolio_notional = inputDict["portfolio_notional"]
     m_futures = inputDict["m_futures"]   # number of hedge instruments (M)
-    M = inputDict["M"]                   # big-M constant for |w_h| <= M z
+    M = inputDict["M"]                   # big-M for |w_h| <= M z
 
-    # Factor dimension K from covariance (should match B_b/B_h)
+    # Factor dimension from covariance
     n_factors = Cov_F.shape[0]
 
-    # Base factor exposure from the portfolio only: b_base = B_b @ w_b  (K × 1)
-    exposure_base = B_b @ w_b
+    # Base factor exposure from portfolio only:
+    # net_exposure = B_b.T @ w_b + B_h.T @ w_h  in your original CVXPY code
+    # so exposure_base = B_b.T @ w_b (K,)
+    exposure_base = B_b.T @ w_b
 
     # -----------------------------
     # ADV-based max weight per hedge
@@ -81,19 +83,18 @@ def calculate_optimal_hedge(inputDict):
         M,
         inputDict["adv_cap"] * adv / portfolio_notional
     )
-    max_leverage = 100.0   # L1-norm cap on hedge weights
+    max_leverage = 100.0   # L1-norm cap on hedge weights (sum |w_h|)
     min_weight = 0.30      # kept for structure; not used explicitly
 
     # -----------------------------
     # Pre-compute quadratic pieces
     # -----------------------------
-    # Risk(b_net) = (b_base + B_h w)^T Cov_F (b_base + B_h w)
-    #            = w^T Q w + c^T w + const
-    #
-    # Q = B_h^T Cov_F B_h   (M × M)
-    # c = 2 * B_h^T Cov_F b_base  (M,)
-    Q = B_h.T @ Cov_F @ B_h
-    c_vec = 2.0 * (B_h.T @ (Cov_F @ exposure_base))
+    # Risk(b_net) = (b_base + B_h.T w)^T Cov_F (b_base + B_h.T w)
+    # With B_h shaped (M × K), B_h.T is (K × M):
+    #   Q     = B_h @ Cov_F @ B_h.T     (M × M)
+    #   c_vec = 2 * B_h @ Cov_F @ b_base   (M,)
+    Q = B_h @ Cov_F @ B_h.T
+    c_vec = 2.0 * (B_h @ (Cov_F @ exposure_base))
 
     # -----------------------------
     # Build Gurobi model
@@ -124,11 +125,14 @@ def calculate_optimal_hedge(inputDict):
 
     # 3) Optional per-instrument ADV cap:
     #    |w_h[j]| <= max_allowed_weight[j] * z[j]
+    #    Guard the index because adv/max_allowed_weight may be shorter than m_futures.
+    n_cap = max_allowed_weight.shape[0]
     for j in range(m_futures):
-        model.addConstr(
-            u[j] <= max_allowed_weight[j] * z[j],
-            name=f"adv_cap_{j}"
-        )
+        if j < n_cap:  # only apply ADV cap where we actually have ADV data
+            model.addConstr(
+                u[j] <= max_allowed_weight[j] * z[j],
+                name=f"adv_cap_{j}"
+            )
 
     # 4) At most 2 hedge instruments can be active (same as cp.sum(z) <= 2)
     model.addConstr(gp.quicksum(z[j] for j in range(m_futures)) <= 2,
@@ -157,7 +161,7 @@ def calculate_optimal_hedge(inputDict):
 
     model.setObjective(quad_obj, GRB.MINIMIZE)
 
-    # Solver parameters (can tune further)
+    # Solver parameters (you can tune further)
     model.Params.OutputFlag = 0   # suppress verbose output
     model.Params.MIPGap = 1e-4
     model.Params.TimeLimit = 60   # seconds safety cap
@@ -189,7 +193,8 @@ def calculate_optimal_hedge(inputDict):
     # -----------------------------
     # Risk after hedge
     # -----------------------------
-    exposure_after = exposure_before + B_h @ w_h_sol
+    # net_exposure_after = b_base + B_h.T @ w_h
+    exposure_after = exposure_before + B_h.T @ w_h_sol
     risk_after = float(exposure_after.T @ Cov_F @ exposure_after)
     risk_after = math.sqrt(risk_after / 250.0)
     print(f"Risk After: {risk_after}")
